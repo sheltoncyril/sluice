@@ -1,5 +1,6 @@
 import picomatch from 'picomatch';
 import { z } from 'zod';
+import { BUILTIN_VARS } from '../workflows/render';
 
 /**
  * Schema for `.github/chain.yml` (lives in the midstream repo, read at runtime via the API).
@@ -264,6 +265,13 @@ export const chainConfigSchema = z
     };
     seen(cfg.variables, 'variables');
     seen(cfg.secrets, 'secrets');
+
+    // Template values cannot shadow the built-ins (a template author must be able to trust {{ repo }}).
+    for (const key of Object.keys(cfg.workflows.values)) {
+      if ((BUILTIN_VARS as readonly string[]).includes(key)) {
+        add(['workflows', 'values', key], `"${key}" is a built-in template variable and cannot be redefined (built-ins: ${BUILTIN_VARS.join(', ')})`);
+      }
+    }
 
     // One workflow destination per target.
     const dest = new Set<string>();

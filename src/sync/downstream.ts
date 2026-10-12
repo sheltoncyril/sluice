@@ -3,6 +3,7 @@ import { formatIssues } from '../config/parse';
 import { CONFIG_PATH } from '../config/schema';
 import type { RepoRef } from '../github/port';
 import { applyVariables } from '../secrets/variables';
+import { syncWorkflows } from '../workflows/sync';
 import { errorFields } from '../log';
 import { fullName } from '../github/port';
 import type { Logger } from '../log';
@@ -32,8 +33,9 @@ export interface PushInput {
  *
  *  - a push to midstream's TRACKED branch syncs midstream -> downstream (a merged PR is also a push, so
  *    one trigger covers both);
- *  - a push to the DEFAULT branch that changes chain.yml applies its `variables:` block. That push is
- *    the merge you reviewed, so "nothing is applied without my merge" still holds.
+ *  - a push to the DEFAULT branch that changes chain.yml applies its `variables:` block, and one that
+ *    changes chain.yml or the templates re-renders the workflow PRs. That push is the merge you reviewed,
+ *    so "nothing is applied without my merge" still holds.
  *
  * A merged PR is also a push, so this one trigger covers "a merged PR / push on midstream's branch".
  * Returns null when the push is irrelevant (not a midstream repo, other branch, branch deletion).
@@ -64,16 +66,27 @@ export async function syncDownstreamOnPush(deps: ChainDeps, push: PushInput, log
 
   const handle = { holder: push.repo, config: loaded.config, midstreamPort };
 
+  // A push to the default branch is where chain.yml and the templates live. If it changed either (or we
+  // cannot tell, because GitHub truncates large pushes), re-apply what they declare.
   const touched = push.changedPaths ?? null;
-  if (
-    push.defaultBranch &&
-    push.ref === `refs/heads/${push.defaultBranch}` &&
-    (touched === null || touched.includes(CONFIG_PATH))
-  ) {
-    try {
-      await applyVariables(deps, handle, { dryRun: false, trigger: 'webhook:push' }, logger);
-    } catch (e) {
-      logger.error('applying variables failed', errorFields(e));
+  if (push.defaultBranch && push.ref === `refs/heads/${push.defaultBranch}`) {
+    const templatesDir = `${loaded.config.workflows.templates_path}/`;
+    const configChanged = touched === null || touched.includes(CONFIG_PATH);
+    const templatesChanged = touched === null || touched.some((p) => p === CONFIG_PATH || p.startsWith(templatesDir));
+
+    if (configChanged) {
+      try {
+        await applyVariables(deps, handle, { dryRun: false, trigger: 'webhook:push' }, logger);
+      } catch (e) {
+        logger.error('applying variables failed', errorFields(e));
+      }
+    }
+    if (templatesChanged && loaded.config.workflows.files.length > 0) {
+      try {
+        await syncWorkflows(deps, handle, { trigger: 'webhook:push', dryRun: false }, logger);
+      } catch (e) {
+        logger.error('syncing workflows failed', errorFields(e));
+      }
     }
   }
 

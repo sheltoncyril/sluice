@@ -2,7 +2,13 @@ import type { RuntimeConfig } from './env';
 import type { Logger } from './log';
 import type { Store } from './store/types';
 import type { SecretInput, SecretResponse } from './secrets/distribute';
-import type { AdminSyncInput, AdminSyncResponse, AdminVariablesInput, AdminVariablesResponse } from './sync/admin';
+import type {
+  AdminSyncInput,
+  AdminSyncResponse,
+  AdminVariablesInput,
+  AdminVariablesResponse,
+  AdminWorkflowsResponse,
+} from './sync/admin';
 
 /** A verified GitHub webhook delivery. `payload` is untyped until a handler narrows it. */
 export interface WebhookEvent {
@@ -33,4 +39,6 @@ export interface AppContext {
   submitSecret(input: SecretInput): Promise<SecretResponse>;
   /** Apply (or preview) the variables: block of chain.yml. */
   runVariables(input: AdminVariablesInput): Promise<AdminVariablesResponse>;
+  /** Render the workflow templates and open/refresh the workflow PRs (or preview with dryRun). */
+  runWorkflows(input: AdminVariablesInput): Promise<AdminWorkflowsResponse>;
 }

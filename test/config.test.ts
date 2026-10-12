@@ -229,6 +229,13 @@ workflows:
     expect(has(e, 'workflows.files[2].destination')).toBe(true);
   });
 
+  it('rejects workflow values that shadow a built-in template variable', () => {
+    const e = errors(`${MIN}\nworkflows:\n  values: { repo: x, branch: y, node_version: "22" }\n`);
+    expect(has(e, 'workflows.values.repo', /built-in/)).toBe(true);
+    expect(has(e, 'workflows.values.branch', /built-in/)).toBe(true);
+    expect(has(e, 'workflows.values.node_version')).toBe(false);
+  });
+
   it('rejects two templates writing the same destination', () => {
     const e = errors(`${MIN}
 workflows:

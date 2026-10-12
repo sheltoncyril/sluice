@@ -413,3 +413,20 @@ describe('OctokitPort: Actions secrets and variables', () => {
     expect(t.seen[0]!.body).toEqual({ value: 'us' }); // `name` is the URL path parameter, not a body field
   });
 });
+
+describe('OctokitPort: workflow commits (content trees, app-signed commits)', () => {
+  it('createTree sends new text files as `content` (GitHub creates the blob), not as a sha', async () => {
+    const t = port([['POST', /git\/trees$/, { status: 201, body: { sha: 'newtree' } }]]);
+    await t.port.createTree(repo, 'base1', [{ path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: null, content: 'name: ci\n' }]);
+    expect(t.seen[0]!.body).toEqual({
+      base_tree: 'base1',
+      tree: [{ path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', content: 'name: ci\n' }],
+    });
+  });
+
+  it('createCommit with no identity sends neither author nor committer, so GitHub signs it as the app', async () => {
+    const t = port([['POST', /git\/commits$/, { status: 201, body: { sha: 'c1' } }]]);
+    await t.port.createCommit(repo, { message: 'm', treeSha: 'tree1', parents: ['p1'] });
+    expect(t.seen[0]!.body).toEqual({ message: 'm', tree: 'tree1', parents: ['p1'] });
+  });
+});

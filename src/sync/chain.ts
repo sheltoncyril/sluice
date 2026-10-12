@@ -5,7 +5,9 @@ import type { PortFactory } from '../github/ports';
 import type { Logger } from '../log';
 import { isOwnerAllowed } from '../policy';
 import type { Store } from '../store/types';
+import type { ConflictPolicy } from './conflict';
 import { syncHop } from './hop';
+import type { PrMeta } from './pr-meta';
 import type { HopResult, HopSpec } from './hop';
 
 /** Everything chain-level code needs that is not specific to one event. */
@@ -26,53 +28,66 @@ export interface ChainHandle {
   midstreamPort: GitHubPort;
 }
 
-export function buildHopSpec(handle: ChainHandle, hop: HopId): HopSpec {
-  const { config, holder } = handle;
-  const pr = {
+/** Who gets pinged on a conflict: the conflict-specific list, else the PR reviewers, else the assignees. */
+export function conflictPolicyOf(config: ChainConfig): ConflictPolicy {
+  const who =
+    config.conflicts.assignees.length > 0
+      ? config.conflicts.assignees
+      : config.pull_requests.reviewers.length > 0
+        ? config.pull_requests.reviewers
+        : config.pull_requests.assignees;
+  return {
+    label: config.conflicts.label,
+    comment: config.conflicts.comment,
+    assignees: who,
+    requestReview: config.conflicts.request_review,
+  };
+}
+
+export function prMetaOf(config: ChainConfig): PrMeta {
+  return {
     labels: config.pull_requests.labels,
     assignees: config.pull_requests.assignees,
     reviewers: config.pull_requests.reviewers,
     teamReviewers: config.pull_requests.team_reviewers,
     draft: config.pull_requests.draft,
   };
-  // Who gets pinged on a conflict: the conflict-specific list, else the PR reviewers, else the assignees.
-  const conflictWho = config.conflicts.assignees.length > 0
-    ? config.conflicts.assignees
-    : config.pull_requests.reviewers.length > 0
-      ? config.pull_requests.reviewers
-      : config.pull_requests.assignees;
-  const conflicts = {
-    label: config.conflicts.label,
-    comment: config.conflicts.comment,
-    assignees: conflictWho,
-    requestReview: config.conflicts.request_review,
-  };
+}
+
+/**
+ * Files sluice renders from templates into a repo. On the sync hops these are protected automatically:
+ * otherwise upstream's (or midstream's) copy of `.github/workflows/ci.yml` would be merged over the
+ * managed one, and the next template PR would fight the sync PR forever.
+ */
+export function managedWorkflowPaths(config: ChainConfig, role: 'midstream' | 'downstream'): string[] {
+  return config.workflows.files.filter((f) => f.targets.includes(role)).map((f) => f.destination);
+}
+
+export function buildHopSpec(handle: ChainHandle, hop: HopId): HopSpec {
+  const { config, holder } = handle;
   const chain = fullName(holder);
+  const common = { chain, pr: prMetaOf(config), conflicts: conflictPolicyOf(config) };
   if (hop === 'upstream_to_midstream') {
     const h = config.hops.upstream_to_midstream;
     return {
+      ...common,
       id: hop,
-      chain,
       source: { repo: parseRepo(config.upstream.repo), branch: config.upstream.branch },
       target: { repo: holder, branch: config.midstream.branch },
       syncBranch: h.sync_branch,
       mergeMethod: h.merge_method,
-      protectedPaths: h.protected_paths,
-      pr,
-      conflicts,
+      protectedPaths: [...new Set([...h.protected_paths, ...managedWorkflowPaths(config, 'midstream')])],
     };
   }
   const h = config.hops.midstream_to_downstream;
   return {
+    ...common,
     id: hop,
-    chain,
     source: { repo: holder, branch: config.midstream.branch },
     target: { repo: parseRepo(config.downstream.repo), branch: config.downstream.branch },
     syncBranch: h.sync_branch,
     mergeMethod: h.merge_method,
-    protectedPaths: h.protected_paths,
-    pr,
-    conflicts,
+    protectedPaths: [...new Set([...h.protected_paths, ...managedWorkflowPaths(config, 'downstream')])],
   };
 }
 

@@ -87,20 +87,27 @@ export interface TreeEntry {
   sha: string;
 }
 
-/** One change to apply on top of a base tree. `sha: null` deletes the path. */
+/**
+ * One change to apply on top of a base tree. Either `sha` (an existing object; `null` deletes the path)
+ * or, for a new text file, `content` (GitHub creates the blob).
+ */
 export interface TreeChange {
   path: string;
   mode: string;
   type: 'blob' | 'commit';
   sha: string | null;
+  content?: string;
 }
 
 export interface NewCommit {
   message: string;
   treeSha: string;
   parents: string[];
-  /** Used for BOTH author and committer so the commit hash is fully determined by the inputs. */
-  identity: { name: string; email: string; date: string };
+  /**
+   * Used for BOTH author and committer so the commit hash is fully determined by the inputs. Omit it to
+   * let GitHub attribute the commit to the app, which signs it ("Verified").
+   */
+  identity?: { name: string; email: string; date: string };
 }
 
 /** GitHub's lazily computed answer to "can this PR be merged?". `mergeable: null` means "not computed yet". */

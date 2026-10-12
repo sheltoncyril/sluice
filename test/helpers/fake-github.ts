@@ -303,6 +303,7 @@ export class FakeGitHub implements GitHubPort {
   async setBranchSha(repo: RepoRef, branch: string, sha: string, force: boolean): Promise<void> {
     const r = this.repo(repo);
     this.record('setBranchSha', r, { branch, sha, force });
+    this.maybeFail('setBranchSha');
     if (!this.visible(r, sha)) throw new CommitNotReachableError(fullName(repo), sha);
     const current = r.branches.get(branch);
     if (current && !force && !this.ancestors(sha).has(current)) throw new Error('fake: non-fast-forward without force');
@@ -453,12 +454,14 @@ export class FakeGitHub implements GitHubPort {
 
   async createTree(repo: RepoRef, baseTreeSha: string, changes: TreeChange[]): Promise<string> {
     const r = this.repo(repo);
+    this.maybeFail('createTree');
     this.record('createTree', r, { baseTreeSha, changes: changes.map((c) => [c.path, c.sha === null ? 'delete' : 'set']) });
     const base = this.trees.get(baseTreeSha);
     if (!base) throw new Error(`fake: unknown base tree ${baseTreeSha}`);
     const files = { ...base };
     for (const c of changes) {
-      if (c.sha === null) delete files[c.path];
+      if (c.content !== undefined) files[c.path] = c.content;
+      else if (c.sha === null) delete files[c.path];
       else {
         const content = this.blobs.get(c.sha);
         if (content === undefined) throw new Error(`fake: unknown blob ${c.sha}`);
@@ -472,7 +475,8 @@ export class FakeGitHub implements GitHubPort {
   async createCommit(repo: RepoRef, commit: NewCommit): Promise<string> {
     const r = this.repo(repo);
     this.record('createCommit', r, { parents: commit.parents });
-    const sha = this.sha1(`commit:${JSON.stringify([commit.treeSha, commit.parents, commit.message, commit.identity])}`);
+    this.maybeFail('createCommit');
+    const sha = this.sha1(`commit:${JSON.stringify([commit.treeSha, commit.parents, commit.message, commit.identity ?? null])}`);
     if (!this.commits.has(sha)) {
       const files = this.trees.get(commit.treeSha);
       if (!files) throw new Error(`fake: unknown tree ${commit.treeSha}`);
@@ -482,9 +486,9 @@ export class FakeGitHub implements GitHubPort {
         parents: commit.parents,
         files,
         treeSha: commit.treeSha,
-        date: commit.identity.date,
+        date: commit.identity?.date ?? new Date(Date.UTC(2026, 0, 1) + this.seq * 1000).toISOString(),
         message: commit.message,
-        author: commit.identity.name,
+        author: commit.identity?.name ?? 'github-app',
         network: r.network,
       });
     }

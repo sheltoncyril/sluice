@@ -9,7 +9,7 @@ import { createLogger } from './log';
 import { D1Store } from './store/d1';
 import { distributeSecret } from './secrets/distribute';
 import { NaclSealer } from './secrets/sealer';
-import { runAdminSync, runAdminVariables } from './sync/admin';
+import { runAdminSync, runAdminVariables, runAdminWorkflows } from './sync/admin';
 import type { PollDeps } from './sync/poll';
 import { pollUpstreams } from './sync/poll';
 
@@ -48,6 +48,7 @@ function getRuntime(env: Env): Runtime {
       runSync: (input) => runAdminSync(chainDeps, input, logger),
       submitSecret: (input) => distributeSecret({ ...chainDeps, sealer }, input, logger),
       runVariables: (input) => runAdminVariables(chainDeps, input, logger),
+      runWorkflows: (input) => runAdminWorkflows(chainDeps, input, logger),
     },
   };
   return cached;

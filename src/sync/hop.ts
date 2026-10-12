@@ -10,6 +10,7 @@ import type { Store } from '../store/types';
 import { awaitMergeable, reconcileConflict } from './conflict';
 import type { ConflictPolicy, MergeabilityPolling } from './conflict';
 import { parseMarker } from './marker';
+import { decoratePullRequest } from './pr-meta';
 import { renderSyncPrBody, renderSyncPrTitle } from './pr-body';
 import { createRestoreCommit, planProtection } from './protect';
 
@@ -365,7 +366,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
       pr = res.pr;
       created = res.created;
       if (created) {
-        await decorate(out, target.repo, pr.number, spec, logger);
+        await decoratePullRequest(out, target.repo, pr.number, spec.pr, logger);
         logger.info('opened sync PR', { pr: pr.number });
       }
     } catch (e) {
@@ -420,19 +421,4 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
     plan,
     ...(protection ? { protectedKept: protection.paths } : {}),
   };
-}
-
-/** Labels / assignees / reviewers are conveniences: a bad login must not fail the sync. */
-async function decorate(port: GitHubPort, repo: RepoRef, pr: number, spec: HopSpec, logger: Logger): Promise<void> {
-  const attempt = async (what: string, fn: () => Promise<void>) => {
-    try {
-      await fn();
-    } catch (e) {
-      if (e instanceof RateLimitExceededError) throw e;
-      logger.warn(`could not set ${what} on sync PR`, { pr, ...errorFields(e) });
-    }
-  };
-  await attempt('labels', () => port.addLabels(repo, pr, [...spec.pr.labels]));
-  await attempt('assignees', () => port.addAssignees(repo, pr, [...spec.pr.assignees]));
-  await attempt('reviewers', () => port.requestReviewers(repo, pr, [...spec.pr.reviewers], [...spec.pr.teamReviewers]));
 }

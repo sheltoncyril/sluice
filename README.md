@@ -29,10 +29,10 @@ This repo is being built in reviewable steps.
 | 3 | Hop sync (cron upstream→midstream, webhook midstream→downstream) | ✅ built, merged |
 | 4 | Conflict handling (label / comment / assign) and protected paths | ✅ built, merged |
 | 5 | Secret / variable pass-through distribution | ✅ built, **awaiting your review** |
-| 6 | Workflow template PRs | ⏳ not built |
+| 6 | Workflow template PRs | ✅ built, **awaiting your review** |
 | 7 | Drift reconcile | ⏳ not built |
 
-Everything below is accurate for steps 1–5. Sections marked *(planned)* describe design intent only.
+Everything below is accurate for steps 1–6. Sections marked *(planned)* describe design intent only.
 
 ---
 
@@ -55,11 +55,11 @@ Then **Generate a private key** (downloads a `.pem`) and note the **App ID**.
 
 Install the app on the midstream repo and the downstream repo (each org installs it separately).
 
-> **Why "Workflows" even for plain sync:** upstream commits may touch `.github/workflows/`, and GitHub
-> rejects pushes from an app that create or modify workflow files without this permission. I have
-> not verified whether it also applies to creating a ref at an existing commit, so grant it (as the
-> brief specifies) and drop it only after testing. "Secrets" and "Variables" are only used from
-> step 5 on; you may leave them off until then.
+> **Why "Workflows":** workflow template PRs (step 6) write under `.github/workflows/`, and GitHub
+> refuses that to an app without this permission (sluice says so plainly when it happens). It may also
+> be needed for plain sync, because upstream commits can touch `.github/workflows/`; I have not verified
+> whether it applies to creating a ref at an existing commit, so grant it (as the brief specifies) and
+> drop it only after testing. "Secrets" and "Variables" are used by step 5.
 >
 > **Public app, private data:** a GitHub App can be installed on other accounts only if it is
 > public. Midstream and downstream in different orgs therefore forces the app to be public, which
@@ -120,9 +120,10 @@ deliveries* page to confirm the webhook returns `202`.
 `libsodium-wrappers` cannot run on Workers (it asks for random bytes at import time and instantiates
 WASM from bytes at runtime, which Workers refuse with `Wasm code generation disallowed by embedder`;
 I confirmed both in real workerd). libsodium stays a **test-only** dependency, used as an independent
-oracle. A seal costs about **2 ms of CPU** warm (measured in Node; a cold isolate is slower), so a
-submission to two repos lands near the Workers **Free** plan's 10 ms CPU limit. If submissions fail
-with a CPU-limit error, move to the $5 Workers plan. Nothing in `src/` outside `index.ts` and
+oracle. A seal costs about **2 ms** of CPU warm (Node), but the **first seal in a fresh isolate measured
+about 7 ms** in local workerd (JIT warm-up), so a submission to two repos can exceed the Workers **Free**
+plan's 10 ms CPU limit. Plan on the **$5 Workers plan** if you submit secrets (it has no such limit);
+everything else in sluice is I/O-bound and light on CPU. Nothing in `src/` outside `index.ts` and
 `store/d1.ts` imports a Workers-only API, so a plain Node server (SQLite `Store`) remains an option.
 
 ## 4. `.github/chain.yml`
@@ -333,7 +334,50 @@ The bearer token (≥ 24 chars, constant-time compare) is the application-level 
 **disable the `*.workers.dev` route** (or protect it too): an Access policy on a custom domain does not
 cover the workers.dev hostname. Add a WAF rate-limit rule on `/admin/*`.
 
-## 7. Threat model
+## 7. Workflow templates
+
+Keep one workflow template in midstream and have sluice render it into each repo that should have it.
+
+```yaml
+workflows:
+  templates_path: templates          # in the midstream repo
+  branch: chain/workflows            # bot branch in each target; PRs open from it
+  values: { node_version: "22" }
+  files:
+    - template: ci.yml               # templates/ci.yml
+      destination: .github/workflows/ci.yml
+      targets: [midstream, downstream]
+```
+
+See [`examples/templates/ci.yml`](examples/templates/ci.yml). **Syntax:** `{{ name }}` is replaced.
+GitHub's own `${{ secrets.X }}` is **never** touched (a `{{ … }}` preceded by `$` is left alone), and
+`\{{ name }}` writes a literal placeholder. Placeholders in comments are replaced too. An undefined name
+is an error that lists every missing one. **Built-ins** (do not redefine them; the schema rejects it):
+`repo`, `owner`, `name`, `branch`, `role` (`midstream`|`downstream`), `upstream_repo`, `midstream_repo`,
+`downstream_repo`. The rendered file must be valid YAML or nothing is pushed.
+
+For each target repo, sluice compares the rendered files with what is on its tracked branch and, if
+they differ, commits the new content to `chain/workflows` and opens (or refreshes) **one PR**. Each
+file starts with a "managed by sluice" header naming its template. The commit carries no author, so
+GitHub attributes it to the app and signs it ("Verified").
+
+- **Idempotent.** Matching files mean no PR and no writes; an existing PR is refreshed in place. The PR
+  body carries a SHA-256 digest of the content, so a PR you **close unmerged** is not reopened until the
+  templates or values change. A PR you *merge* and someone later hand-edits away is reopened, since the
+  content drifted.
+- **Triggered** by a push to midstream's default branch that changes `chain.yml` or anything under the
+  templates path (that push is your merge), and on demand:
+  `POST /admin/workflows {"chain":"my-org/widget","dry_run":true}` previews the drift and writes nothing.
+  The daily reconcile (step 7) also checks it.
+- **No fights with hop sync.** Managed destinations are added to each hop's protected paths
+  automatically, so upstream's (or midstream's) copy of `.github/workflows/ci.yml` cannot be merged over
+  the one sluice renders, and midstream's rendered copy does not flow downstream over downstream's own.
+- **Conflicts** (someone edited the managed file on the target branch) get the same label, comment and
+  assignee treatment as sync PRs.
+- Needs the app's **Workflows: Read & write** permission. Without it GitHub refuses the write and the
+  run log says exactly that.
+
+## 8. Threat model
 
 | Threat | Mitigation |
 |---|---|
@@ -368,10 +412,10 @@ Credentials the Worker itself must hold (unavoidable): `GITHUB_APP_PRIVATE_KEY`,
 `GITHUB_WEBHOOK_SECRET`, `ADMIN_TOKEN`, as Worker secrets. Installation tokens are minted per use,
 cached in isolate memory only, and live ~1 hour.
 
-## 8. Development
+## 9. Development
 
 ```bash
-npm test               # vitest: ~320 tests, no network, no Cloudflare account
+npm test               # vitest: ~380 tests, no network, no Cloudflare account
 npm run typecheck
 npx wrangler dev       # local workerd; put dev secrets in .dev.vars (git-ignored)
 ```
@@ -393,6 +437,8 @@ and one real sync on a throwaway chain before relying on them:
 - *(step 4)* the Merges API accepting the **unreferenced restore commit** as `head` (it is created
   through the Git Data API and only becomes reachable once merged into the sync branch), and the Git
   Data endpoints (`git/commits`, `git/trees`) resolving a parent-repo SHA through the fork;
+- *(step 6)* GitHub accepting a Git Data API commit that adds or changes `.github/workflows/*.yml` (and
+  what it says without the Workflows permission), and signing a commit that sets no author;
 - *(step 5)* GitHub accepting the sealed-box ciphertext for `PUT .../actions/secrets/{name}`. It is
   checked against libsodium (GitHub's reference) in tests, and the 32-byte Curve25519 key format is
   GitHub's documented one, but no secret was sent to the real API;

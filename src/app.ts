@@ -88,6 +88,20 @@ export function createApp(contextFactory: ContextFactory): Hono<AppEnv> {
     }
   });
 
+  // Render the workflow templates and open/refresh the PRs (dry_run previews drift and writes nothing).
+  app.post('/admin/workflows', async (c) => {
+    const ctx = c.get('ctx');
+    const parsed = variablesRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'expected {"chain":"owner/midstream","dry_run":false}' }, 400);
+    try {
+      const out = await ctx.runWorkflows({ chain: parsed.data.chain, dryRun: parsed.data.dry_run });
+      return out.ok ? c.json(out.result) : c.json({ error: out.error, ...(out.details ? { details: out.details } : {}) }, out.status);
+    } catch (e) {
+      ctx.logger.error('admin workflows failed', errorFields(e));
+      return c.json({ error: 'workflow sync failed; see logs' }, 500);
+    }
+  });
+
   const secretRequest = z.strictObject({
     chain: z.string().min(3).max(200),
     name: z.string().min(1).max(100),

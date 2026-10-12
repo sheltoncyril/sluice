@@ -1,6 +1,8 @@
 import { loadChainConfig } from '../config/load';
 import { applyVariables } from '../secrets/variables';
 import type { VariablesResult } from '../secrets/variables';
+import { syncWorkflows } from '../workflows/sync';
+import type { WorkflowsResult } from '../workflows/sync';
 import { formatIssues } from '../config/parse';
 import type { HopId } from '../config/schema';
 import { parseRepo } from '../github/port';
@@ -68,5 +70,19 @@ export async function runAdminVariables(
   const loaded = await loadChainHandle(deps, input.chain);
   if (!loaded.ok) return loaded;
   const result = await applyVariables(deps, loaded.handle, { dryRun: input.dryRun, trigger: 'admin' }, logger);
+  return { ok: true, result };
+}
+
+export type AdminWorkflowsResponse = { ok: true; result: WorkflowsResult } | AdminError;
+
+/** Render the templates and open/refresh the workflow PRs now (or preview with dry_run). */
+export async function runAdminWorkflows(
+  deps: ChainDeps,
+  input: AdminVariablesInput,
+  logger: Logger,
+): Promise<AdminWorkflowsResponse> {
+  const loaded = await loadChainHandle(deps, input.chain);
+  if (!loaded.ok) return loaded;
+  const result = await syncWorkflows(deps, loaded.handle, { trigger: 'admin', dryRun: input.dryRun }, logger);
   return { ok: true, result };
 }

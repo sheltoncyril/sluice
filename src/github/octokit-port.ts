@@ -351,13 +351,12 @@ export class OctokitPort implements GitHubPort {
       owner: repo.owner,
       repo: repo.repo,
       base_tree: baseTreeSha,
-      tree: changes.map((c) => ({
-        path: c.path,
-        mode: c.mode as '100644',
-        type: c.type,
-        // `sha: null` removes the path from the base tree.
-        sha: c.sha as string,
-      })),
+      tree: changes.map((c) =>
+        c.content !== undefined
+          ? { path: c.path, mode: c.mode as '100644', type: c.type, content: c.content }
+          : // `sha: null` removes the path from the base tree.
+            { path: c.path, mode: c.mode as '100644', type: c.type, sha: c.sha as string },
+      ),
     });
     return res.data.sha;
   }
@@ -369,8 +368,7 @@ export class OctokitPort implements GitHubPort {
       message: commit.message,
       tree: commit.treeSha,
       parents: commit.parents,
-      author: commit.identity,
-      committer: commit.identity,
+      ...(commit.identity ? { author: commit.identity, committer: commit.identity } : {}),
     });
     return res.data.sha;
   }

@@ -49,16 +49,20 @@ conflicts:
   assignees: [octocat] # defaults to pull_requests.reviewers when empty
   request_review: true
 
-# --- consumed by later steps (parsed and validated now) -------------------------------------
+# --- workflow templates, variables and secrets ----------------------------------------------------
 workflows:
-  templates_path: templates
-  branch: chain/workflows
+  templates_path: templates # in the midstream repo; see examples/templates/ci.yml
+  branch: chain/workflows   # bot branch in each target; PRs open from it
+  # Available in templates as {{ node_version }}. Built-ins (do not redefine): repo, owner, name,
+  # branch, role, upstream_repo, midstream_repo, downstream_repo. ${{ ... }} is left untouched.
   values:
     node_version: "22"
   files:
-    - template: ci.yml
-      destination: .github/workflows/ci.yml
+    - template: ci.yml                      # templates/ci.yml
+      destination: .github/workflows/ci.yml # must be directly under .github/workflows/
       targets: [midstream, downstream]
+  # Managed destinations are protected automatically on the sync hops, so upstream's (or midstream's)
+  # copy of the same file can never overwrite what sluice renders.
 
 variables: # non-sensitive; applied straight from this file
   - name: DEPLOY_REGION
