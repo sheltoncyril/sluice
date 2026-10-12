@@ -1,0 +1,69 @@
+# .github/chain.yml — lives in the MIDSTREAM repo's default branch.
+# chain-sync reads it at runtime through the GitHub API; nothing is cached or stored.
+version: 1
+
+# upstream is third-party: public, read-only, the app is NOT installed there.
+upstream:
+  repo: acme-oss/widget
+  branch: main
+midstream:
+  repo: my-org/widget
+  branch: main
+downstream:
+  repo: my-other-org/widget-deploy
+  branch: main
+
+# "fork": midstream is a fork of upstream, downstream is a fork of midstream, so sync branches can
+# point straight at the source commit. "git-data" (unrelated repos) is planned, not built yet.
+transport: fork
+
+hops:
+  upstream_to_midstream:
+    # How YOU merge the sync PR. "merge" keeps upstream history, so "behind?" is plain ancestry.
+    # "squash"/"rebase" also work: the app then remembers which upstream commit each merged
+    # sync PR carried (a marker in the PR body) instead of relying on ancestry.
+    merge_method: merge
+    poll_interval_minutes: 60 # can only slow the hourly cron down, never speed it up
+    sync_branch: chain/sync-upstream
+    # Midstream-only patches that upstream changes must not overwrite (picomatch globs).
+    protected_paths:
+      - "patches/**"
+      - "MIDSTREAM.md"
+      - ".github/workflows/midstream-*.yml"
+  midstream_to_downstream:
+    merge_method: merge
+    sync_branch: chain/sync-midstream
+    protected_paths: []
+
+pull_requests:
+  labels: [chain-sync]
+  assignees: [octocat]
+  reviewers: [octocat]
+  team_reviewers: []
+  draft: false
+
+conflicts:
+  label: chain-sync/conflict
+  comment: true
+  assignees: [octocat] # defaults to pull_requests.reviewers when empty
+  request_review: true
+
+# --- consumed by later steps (parsed and validated now) -------------------------------------
+workflows:
+  templates_path: templates
+  branch: chain/workflows
+  values:
+    node_version: "22"
+  files:
+    - template: ci.yml
+      destination: .github/workflows/ci.yml
+      targets: [midstream, downstream]
+
+variables: # non-sensitive; applied straight from this file
+  - name: DEPLOY_REGION
+    value: eu-west-1
+    targets: [downstream]
+
+secrets: # NAMES ONLY. Values are submitted once via the authenticated endpoint, never stored.
+  - name: NPM_TOKEN
+    targets: [midstream, downstream]
