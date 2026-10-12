@@ -1,10 +1,19 @@
-import type { GitHubPort, RepoRef } from '../github/port';
+import { formatIssuesMarkdown } from '../config/parse';
+import type { ConfigIssue } from '../config/parse';
+import { CONFIG_PATH } from '../config/schema';
+import type { GitHubPort, IssueRef, RepoRef } from '../github/port';
 import { RateLimitExceededError } from '../github/resilient';
 import { errorFields, scrubString } from '../log';
 import type { Logger } from '../log';
 
 /** Hidden marker: the report is ONE issue, found by label + marker, edited in place, closed when clear. */
 export const DRIFT_MARKER = '<!-- sluice:drift-report -->';
+
+/**
+ * Present only in the body written for an unreadable chain.yml. Recovery closes a report carrying it and
+ * never a drift report, whose findings only a reconcile can judge.
+ */
+export const CONFIG_INVALID_MARKER = '<!-- sluice:config-invalid -->';
 
 export type FindingKind =
   | 'secret_missing'
@@ -84,13 +93,62 @@ export interface ReportOutcome {
 
 const normalise = (s: string) => s.replace(/\r\n/g, '\n').trim();
 
+export interface ReportPolicy {
+  label: string;
+  assignees: readonly string[];
+}
+
+/** Make the one report issue carry `body`: create it, edit it in place, or leave it alone if it already does. */
+async function upsertReportIssue(
+  port: GitHubPort,
+  holder: RepoRef,
+  chain: string,
+  existing: IssueRef | null,
+  body: string,
+  policy: ReportPolicy,
+  logger: Logger,
+): Promise<ReportOutcome> {
+  if (!existing) {
+    const created = await port.createIssue(holder, {
+      title: `sluice: drift report for ${chain}`,
+      body,
+      labels: [policy.label],
+    });
+    if (policy.assignees.length > 0) {
+      await port.addAssignees(holder, created.number, [...policy.assignees]).catch((e) => {
+        if (e instanceof RateLimitExceededError) throw e;
+        logger.warn('could not assign the drift report', errorFields(e)); // a bad login must not lose the report
+      });
+    }
+    return { status: 'created', url: created.htmlUrl };
+  }
+  if (normalise(existing.body) !== normalise(body)) {
+    await port.updateIssue(holder, existing.number, { body });
+    return { status: 'updated', url: existing.htmlUrl };
+  }
+  return { status: 'unchanged', url: existing.htmlUrl };
+}
+
+/** A failed attempt is an outcome, not an exception: a missing permission must never take a run down. */
+function failedOutcome(e: unknown, logger: Logger, what: string): ReportOutcome {
+  const status = (e as { status?: number } | null)?.status;
+  logger.warn(`could not ${what}`, errorFields(e));
+  return {
+    status: 'failed',
+    error:
+      status === 403 || status === 404
+        ? 'GitHub refused: the app needs the "Issues: Read & write" permission to keep a drift report (or set reconcile.report to "none")'
+        : scrubString(e instanceof Error ? e.message : 'unknown error').slice(0, 200),
+  };
+}
+
 /** Create, refresh, or close the single drift-report issue so that it mirrors `findings`. */
 export async function publishReport(
   port: GitHubPort,
   holder: RepoRef,
   chain: string,
   findings: readonly DriftFinding[],
-  policy: { label: string; assignees: readonly string[] },
+  policy: ReportPolicy,
   logger: Logger,
 ): Promise<ReportOutcome> {
   try {
@@ -103,33 +161,88 @@ export async function publishReport(
       return { status: 'closed', url: existing.htmlUrl };
     }
 
-    const body = renderReport(chain, findings);
-    const title = `sluice: drift report for ${chain}`;
-    if (!existing) {
-      const created = await port.createIssue(holder, { title, body, labels: [policy.label] });
-      if (policy.assignees.length > 0) {
-        await port.addAssignees(holder, created.number, [...policy.assignees]).catch((e) => {
-          if (e instanceof RateLimitExceededError) throw e;
-          logger.warn('could not assign the drift report', errorFields(e)); // a bad login must not lose the report
-        });
-      }
-      return { status: 'created', url: created.htmlUrl };
-    }
-    if (normalise(existing.body) !== normalise(body)) {
-      await port.updateIssue(holder, existing.number, { body });
-      return { status: 'updated', url: existing.htmlUrl };
-    }
-    return { status: 'unchanged', url: existing.htmlUrl };
+    return await upsertReportIssue(port, holder, chain, existing, renderReport(chain, findings), policy, logger);
   } catch (e) {
     if (e instanceof RateLimitExceededError) throw e;
-    const status = (e as { status?: number } | null)?.status;
-    logger.warn('could not publish the drift report', errorFields(e));
-    return {
-      status: 'failed',
-      error:
-        status === 403 || status === 404
-          ? 'GitHub refused: the app needs the "Issues: Read & write" permission to keep a drift report (or set reconcile.report to "none")'
-          : scrubString(e instanceof Error ? e.message : 'unknown error').slice(0, 200),
-    };
+    return failedOutcome(e, logger, 'publish the drift report');
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// An unreadable chain.yml
+// ---------------------------------------------------------------------------------------------
+
+const MAX_CONFIG_ERRORS_LISTED = 20;
+
+/**
+ * The body when chain.yml cannot be read. It replaces whatever drift findings the issue held: they were
+ * judged against a configuration sluice can no longer see, and the next reconcile restores them.
+ * Deterministic (no timestamps), and built only from ConfigIssue text, which parse.ts guarantees carries
+ * no user-typed value.
+ */
+export function renderConfigReport(chain: string, errors: readonly ConfigIssue[]): string {
+  const shown = errors.slice(0, MAX_CONFIG_ERRORS_LISTED);
+  const lines = [
+    DRIFT_MARKER,
+    CONFIG_INVALID_MARKER,
+    `## sluice drift report for \`${chain}\``,
+    '',
+    `### ❌ \`${CONFIG_PATH}\` is invalid`,
+    '',
+    'sluice cannot read this chain\'s configuration, so the chain is **paused**: no upstream or downstream sync, ' +
+      'no variable or workflow apply, and no drift check, until the file is valid again. Fix these on the default branch:',
+    '',
+    formatIssuesMarkdown(shown),
+  ];
+  if (errors.length > shown.length) lines.push(`- … and ${errors.length - shown.length} more`);
+  lines.push('', '---', '_Reported by sluice. This issue closes itself once the file is valid again._');
+  return lines.join('\n');
+}
+
+/** Create or refresh the report for an unreadable chain.yml. Never throws except on a rate limit. */
+export async function publishConfigInvalid(
+  port: GitHubPort,
+  holder: RepoRef,
+  chain: string,
+  errors: readonly ConfigIssue[],
+  policy: ReportPolicy,
+  logger: Logger,
+): Promise<ReportOutcome> {
+  try {
+    const existing = await port.findOpenIssueByLabelMarker(holder, policy.label, DRIFT_MARKER);
+    return await upsertReportIssue(port, holder, chain, existing, renderConfigReport(chain, errors), policy, logger);
+  } catch (e) {
+    if (e instanceof RateLimitExceededError) throw e;
+    return failedOutcome(e, logger, 'report the invalid chain.yml');
+  }
+}
+
+/**
+ * chain.yml is readable again: close the report written for it, and only that report.
+ *
+ * Quiet on failure (debug, not warn): this runs for every valid chain on every scan, and without the
+ * Issues permission it would fail every time.
+ */
+export async function clearConfigInvalid(
+  port: GitHubPort,
+  holder: RepoRef,
+  label: string,
+  logger: Logger,
+): Promise<ReportOutcome> {
+  try {
+    const existing = await port.findOpenIssueByLabelMarker(holder, label, DRIFT_MARKER);
+    if (!existing || !existing.body.includes(CONFIG_INVALID_MARKER)) return { status: 'unchanged' };
+    await port.createComment(
+      holder,
+      existing.number,
+      'sluice: chain.yml is valid again, so this chain is back in service. Drift is re-checked on the next ' +
+        'reconcile (and reopens as a new issue if anything has drifted); this report is closed.',
+    );
+    await port.updateIssue(holder, existing.number, { state: 'closed' });
+    return { status: 'closed', url: existing.htmlUrl };
+  } catch (e) {
+    if (e instanceof RateLimitExceededError) throw e;
+    logger.debug('could not check for a stale invalid-config report', errorFields(e));
+    return { status: 'failed', error: scrubString(e instanceof Error ? e.message : 'unknown error').slice(0, 200) };
   }
 }

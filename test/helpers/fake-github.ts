@@ -582,6 +582,7 @@ export class FakeGitHub implements GitHubPort {
   async findOpenIssueByLabelMarker(repo: RepoRef, label: string, marker: string): Promise<IssueRef | null> {
     const r = this.repo(repo);
     this.record('findOpenIssueByLabelMarker', r, { label });
+    this.maybeFail('findOpenIssueByLabelMarker');
     const i = r.issues.find((i) => i.state === 'open' && i.labels.has(label) && i.body.includes(marker));
     return i ? { number: i.number, htmlUrl: `https://github.com/${r.key}/issues/${i.number}`, body: i.body } : null;
   }

@@ -20,7 +20,7 @@ export const SYNC_BRANCH_PREFIX = 'chain/';
 // ---------------------------------------------------------------------------------------------
 
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+export const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const TEAM_SLUG_RE = /^[A-Za-z0-9_.-]{1,100}$/;
 const ACTIONS_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 
@@ -274,7 +274,7 @@ export const chainConfigSchema = z
     for (let i = 0; i < botBranches.length; i++) {
       for (let j = i + 1; j < botBranches.length; j++) {
         if (botBranches[i]![1] === botBranches[j]![1]) {
-          add(botBranches[j]![0], `duplicates ${botBranches[i]![0].join('.')} ("${botBranches[i]![1]}"); bot branches must be distinct`);
+          add(botBranches[j]![0], `duplicates ${botBranches[i]![0].join('.')}; bot branches must be distinct`);
         }
       }
     }
@@ -285,7 +285,7 @@ export const chainConfigSchema = z
       items.forEach((item, idx) => {
         for (const t of item.targets) {
           const id = `${t}:${item.name}`;
-          if (bucket.has(id)) add([key, idx, 'name'], `"${item.name}" is declared more than once for ${t}`);
+          if (bucket.has(id)) add([key, idx, 'name'], `is declared more than once for ${t}`);
           bucket.add(id);
         }
       });
@@ -305,7 +305,7 @@ export const chainConfigSchema = z
     cfg.workflows.files.forEach((f, idx) => {
       for (const t of f.targets) {
         const id = `${t}:${f.destination}`;
-        if (dest.has(id)) add(['workflows', 'files', idx, 'destination'], `"${f.destination}" is written twice for ${t}`);
+        if (dest.has(id)) add(['workflows', 'files', idx, 'destination'], `is written twice for ${t}`);
         dest.add(id);
       }
     });

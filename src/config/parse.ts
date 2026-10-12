@@ -1,7 +1,8 @@
 import { isMap, isNode, isScalar, LineCounter, parseDocument } from 'yaml';
 import type { Document } from 'yaml';
 import { z } from 'zod';
-import { chainConfigSchema, CONFIG_PATH } from './schema';
+import { BUILTIN_VARS } from '../workflows/render';
+import { chainConfigSchema, CONFIG_PATH, LOGIN_RE } from './schema';
 import type { ChainConfig } from './schema';
 
 export interface ConfigIssue {
@@ -21,6 +22,46 @@ export type ParseResult =
 export const MAX_CONFIG_BYTES = 64 * 1024;
 
 type PathKey = string | number;
+
+/**
+ * Wording for YAML syntax errors, by the library's error code. The library's own text is never shown:
+ * several of its messages quote the source (`Unresolved tag: <tag>`, `Block scalar header includes
+ * extra characters: <text>`), and these errors end up in an issue, a PR comment and the run log, so a
+ * value pasted into the wrong place must not come back out of them.
+ */
+const YAML_ERROR_TEXT: Record<string, string> = {
+  ALIAS_PROPS: 'an alias cannot carry an anchor or a tag',
+  BAD_ALIAS: 'invalid alias',
+  BAD_COLLECTION_TYPE: 'a tag does not match the kind of value it is on',
+  BAD_DIRECTIVE: 'invalid YAML directive',
+  BAD_DQ_ESCAPE: 'invalid escape sequence in a double-quoted string',
+  BAD_INDENT: 'bad indentation',
+  BAD_PROP_ORDER: 'anchors and tags must come after the indicator',
+  BAD_SCALAR_START: 'a plain value cannot start with a reserved character (quote it)',
+  BLOCK_AS_IMPLICIT_KEY: 'nested mappings are not allowed in compact mappings',
+  BLOCK_IN_FLOW: 'a block collection is not allowed inside a flow collection',
+  DUPLICATE_KEY: 'map keys must be unique',
+  IMPOSSIBLE: 'the file could not be parsed',
+  KEY_OVER_1024_CHARS: 'a map key is longer than 1024 characters',
+  MISSING_CHAR: 'a closing or separating character is missing (quote, bracket, brace or comma)',
+  MULTILINE_IMPLICIT_KEY: 'an implicit map key must be on one line',
+  MULTIPLE_ANCHORS: 'a node can only have one anchor',
+  MULTIPLE_DOCS: 'the file holds more than one YAML document',
+  MULTIPLE_TAGS: 'a node can only have one tag',
+  NON_STRING_KEY: 'map keys must be strings',
+  RESOURCE_EXHAUSTION: 'aliases expand too far',
+  TAB_AS_INDENT: 'tabs cannot be used for indentation',
+  TAG_RESOLVE_FAILED: 'an unknown or unsupported YAML tag',
+  UNEXPECTED_TOKEN: 'unexpected content',
+};
+
+/** Same, for what `toJS` throws (an alias to an anchor that does not exist, or alias expansion past our cap). */
+function conversionProblem(e: unknown): string {
+  const text = e instanceof Error ? e.message : '';
+  if (/^Unresolved alias/.test(text)) return 'YAML syntax: an alias refers to an anchor that is not defined above it';
+  if (/alias count/i.test(text)) return 'YAML syntax: aliases expand too far';
+  return 'YAML syntax: the file could not be converted to data';
+}
 
 export function parseChainConfig(source: string): ParseResult {
   const fileProblem = (message: string): ParseResult => ({
@@ -53,14 +94,20 @@ export function parseChainConfig(source: string): ParseResult {
         return {
           severity: 'error' as const,
           path: '',
-          message: `YAML syntax: ${e.message.split('\n')[0]}`,
+          message: `YAML syntax: ${YAML_ERROR_TEXT[e.code] ?? 'invalid YAML'}`,
           ...(at ? { line: at.line, column: at.col } : {}),
         };
       }),
     };
   }
 
-  const data: unknown = doc.toJS({ maxAliasCount: 20 });
+  // `toJS` throws (it does not report through doc.errors) for an unresolved alias or an alias bomb.
+  let data: unknown;
+  try {
+    data = doc.toJS({ maxAliasCount: 20 });
+  } catch (e) {
+    return fileProblem(conversionProblem(e));
+  }
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     return fileProblem('top level must be a mapping of keys (version, upstream, midstream, ...)');
   }
@@ -71,6 +118,51 @@ export function parseChainConfig(source: string): ParseResult {
   }
 
   return { ok: true, config: parsed.data, warnings: collectWarnings(parsed.data) };
+}
+
+/** How an unreadable chain.yml should be reported: whatever of the reporting settings can still be trusted. */
+export interface ReportingPreference {
+  /** `none` only when the file says so. An unparseable file cannot opt out, so it reports. */
+  report: 'issue' | 'none';
+  label: string;
+  assignees: string[];
+}
+
+const RECONCILE_DEFAULTS = chainConfigSchema.shape.reconcile.parse(undefined);
+
+/**
+ * Best-effort read of `reconcile.report`, `reconcile.issue_label` and the assignees from a file that
+ * failed validation, so an owner who opted out of issues is not sent one about their broken file.
+ *
+ * Only a file that is valid YAML is read (a half-parsed document is not evidence of what the owner
+ * meant), and only a value that would itself be valid is used; anything else falls back to the default.
+ * Never throws.
+ */
+export function readReportingPreference(source: string): ReportingPreference {
+  const pref: ReportingPreference = { report: RECONCILE_DEFAULTS.report, label: RECONCILE_DEFAULTS.issue_label, assignees: [] };
+  try {
+    if (new TextEncoder().encode(source).byteLength > MAX_CONFIG_BYTES) return pref;
+    const doc = parseDocument(source, { schema: 'core', version: '1.2', uniqueKeys: true, prettyErrors: false });
+    if (doc.errors.length > 0) return pref;
+    const root: unknown = doc.toJS({ maxAliasCount: 20 });
+
+    const child = (from: unknown, key: string): unknown =>
+      from !== null && typeof from === 'object' && !Array.isArray(from) ? (from as Record<string, unknown>)[key] : undefined;
+
+    const reconcile = child(root, 'reconcile');
+    if (child(reconcile, 'report') === 'none') pref.report = 'none';
+    const label = child(reconcile, 'issue_label');
+    if (typeof label === 'string' && label.length >= 1 && label.length <= 50) pref.label = label;
+
+    const logins = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((l): l is string => typeof l === 'string' && LOGIN_RE.test(l)) : [];
+    const pr = child(root, 'pull_requests');
+    const assignees = logins(child(pr, 'assignees'));
+    pref.assignees = assignees.length > 0 ? assignees : logins(child(pr, 'reviewers'));
+  } catch {
+    /* defaults */
+  }
+  return pref;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -105,23 +197,41 @@ function locateKey(doc: Document, lc: LineCounter, parent: readonly PathKey[], k
   return locate(doc, lc, parent);
 }
 
+/**
+ * What a path may say about user-authored text. A key the user typed is only echoed when it is one of
+ * the schema's own words (or, for an unknown key, a near-miss of one): anything else might be a value
+ * pasted in the wrong place, and these paths end up in an issue, a PR comment and the run log. Record
+ * keys (template variable names) are user-chosen, so they are never echoed. Positions come from the
+ * real path, so the line:col still points at the offending text.
+ */
+function safeSegments(path: readonly PathKey[]): PathKey[] {
+  return path.map((seg, i) => {
+    if (typeof seg === 'number') return seg;
+    return knownKeysAt(path.slice(0, i)).includes(seg) || schemaVocabulary().has(seg) ? seg : '<key>';
+  });
+}
+
 function translateIssue(issue: z.core.$ZodIssue, doc: Document, lc: LineCounter): ConfigIssue[] {
   const path = issue.path.filter((p): p is PathKey => typeof p === 'string' || typeof p === 'number');
+  const shownParent = safeSegments(path);
 
   if (issue.code === 'unrecognized_keys') {
     const known = knownKeysAt(path);
     return issue.keys.map((key) => {
       const pos = locateKey(doc, lc, path, key);
       const guess = closest(key, known);
-      const moved = path.length === 0 ? MOVED_KEYS[key] : undefined;
+      const echo = guess !== undefined || schemaVocabulary().has(key);
+      const moved = path.length === 0 && echo ? MOVED_KEYS[key] : undefined;
       return {
         severity: 'error' as const,
-        path: pathToString([...path, key]),
+        path: pathToString(echo ? [...shownParent, key] : shownParent),
         message: moved
           ? `unknown key (${moved})`
           : guess
             ? `unknown key (did you mean "${guess}"?)`
-            : 'unknown key',
+            : echo
+              ? 'unknown key'
+              : 'unknown key (its name is not shown; see the position)',
         ...(pos ? { line: pos.line, column: pos.col } : {}),
       };
     });
@@ -129,11 +239,14 @@ function translateIssue(issue: z.core.$ZodIssue, doc: Document, lc: LineCounter)
 
   const pos = locate(doc, lc, path);
   const missing = issue.code === 'invalid_type' && /received undefined/.test(issue.message);
+  // A bad record key is reported by zod with the generic "Invalid key in record"; the schema's own
+  // wording for it is on the nested issue.
+  const nested = issue.code === 'invalid_key' ? issue.issues?.[0]?.message : undefined;
   return [
     {
       severity: 'error',
-      path: pathToString(path),
-      message: missing ? 'is required' : issue.message,
+      path: pathToString(shownParent),
+      message: missing ? 'is required' : (nested ?? issue.message),
       ...(pos ? { line: pos.line, column: pos.col } : {}),
     },
   ];
@@ -144,7 +257,48 @@ function translateIssue(issue: z.core.$ZodIssue, doc: Document, lc: LineCounter)
 // ---------------------------------------------------------------------------------------------
 
 interface ZodLike {
-  _zod?: { def?: { type?: string; shape?: Record<string, ZodLike>; innerType?: ZodLike; element?: ZodLike; in?: ZodLike } };
+  _zod?: {
+    def?: {
+      type?: string;
+      shape?: Record<string, ZodLike>;
+      innerType?: ZodLike;
+      element?: ZodLike;
+      in?: ZodLike;
+      options?: ZodLike[];
+    };
+  };
+}
+
+let vocabulary: Set<string> | undefined;
+
+/**
+ * Every word the schema owns: each key name at any depth, plus the built-in template variables (which
+ * a `workflows.values` entry may shadow, and is told so by name). Derived from the schema, so it cannot
+ * drift from it.
+ */
+function schemaVocabulary(): Set<string> {
+  if (vocabulary) return vocabulary;
+  const words = new Set<string>(BUILTIN_VARS);
+  const seen = new Set<unknown>();
+  const visit = (s: ZodLike | undefined): void => {
+    const def = s?._zod?.def;
+    if (!s || !def || seen.has(s)) return;
+    seen.add(s);
+    for (const [key, child] of Object.entries(def.shape ?? {})) {
+      words.add(key);
+      visit(child);
+    }
+    visit(def.element);
+    visit(def.innerType);
+    visit(def.in);
+    for (const option of def.options ?? []) visit(option);
+  };
+  try {
+    visit(chainConfigSchema as unknown as ZodLike);
+  } catch {
+    /* an unreadable schema falls back to near-miss echo only */
+  }
+  return (vocabulary = words);
 }
 
 function unwrap(s: ZodLike | undefined): ZodLike | undefined {

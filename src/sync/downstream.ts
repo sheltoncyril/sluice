@@ -8,6 +8,8 @@ import { errorFields } from '../log';
 import { fullName } from '../github/port';
 import type { Logger } from '../log';
 import { isOwnerAllowed } from '../policy';
+import { clearInvalidConfigReport, reportDetail, reportInvalidConfig } from '../reconcile/invalid-config';
+import type { ReportOutcome } from '../reconcile/report';
 import { syncChainHop } from './chain';
 import type { ChainDeps } from './chain';
 import type { HopResult } from './hop';
@@ -47,20 +49,36 @@ export async function syncDownstreamOnPush(deps: ChainDeps, push: PushInput, log
   const midstreamPort = await deps.ports.forInstallation(push.installationId);
   const loaded = await loadChainConfig(midstreamPort, push.repo);
 
+  // chain.yml is read from the default branch, so only a push there that touched it (or one we cannot
+  // read the paths of, because GitHub truncates large pushes) can have changed what is in force. Pushes
+  // elsewhere would only repeat a read of the same file.
+  const touched = push.changedPaths ?? null;
+  const onDefaultBranch = !!push.defaultBranch && push.ref === `refs/heads/${push.defaultBranch}`;
+  const configChanged = onDefaultBranch && (touched === null || touched.includes(CONFIG_PATH));
+
   if (loaded.status === 'missing') return null; // not a midstream: nothing to do
   if (loaded.status === 'invalid') {
     logger.warn('push ignored: chain.yml is invalid', { repo: fullName(push.repo), errors: formatIssues(loaded.errors) });
     const at = deps.now().toISOString();
-    await deps.store.recordRun({
-      startedAt: at,
-      finishedAt: at,
-      trigger: 'webhook:push',
-      deliveryId: push.deliveryId,
-      chain: fullName(push.repo),
-      hop: 'config',
-      outcome: 'config_invalid',
-      detail: { errors: loaded.errors.map((e) => ({ path: e.path, line: e.line, message: e.message })) },
-    });
+    let report: ReportOutcome | undefined;
+    try {
+      // The scheduled scan reports it too; doing it here as well makes the bad push visible at once.
+      if (configChanged) report = await reportInvalidConfig(midstreamPort, push.repo, loaded, logger);
+    } finally {
+      await deps.store.recordRun({
+        startedAt: at,
+        finishedAt: at,
+        trigger: 'webhook:push',
+        deliveryId: push.deliveryId,
+        chain: fullName(push.repo),
+        hop: 'config',
+        outcome: 'config_invalid',
+        detail: {
+          errors: loaded.errors.map((e) => ({ path: e.path, line: e.line, message: e.message })),
+          ...reportDetail(report),
+        },
+      });
+    }
     return null;
   }
 
@@ -68,13 +86,13 @@ export async function syncDownstreamOnPush(deps: ChainDeps, push: PushInput, log
 
   // A push to the default branch is where chain.yml and the templates live. If it changed either (or we
   // cannot tell, because GitHub truncates large pushes), re-apply what they declare.
-  const touched = push.changedPaths ?? null;
-  if (push.defaultBranch && push.ref === `refs/heads/${push.defaultBranch}`) {
+  if (onDefaultBranch) {
     const templatesDir = `${loaded.config.workflows.templates_path}/`;
-    const configChanged = touched === null || touched.includes(CONFIG_PATH);
     const templatesChanged = touched === null || touched.some((p) => p === CONFIG_PATH || p.startsWith(templatesDir));
 
     if (configChanged) {
+      // The file is readable now: close the report written while it was not.
+      await clearInvalidConfigReport(midstreamPort, deps.store, push.repo, loaded.config, logger);
       try {
         await applyVariables(deps, handle, { dryRun: false, trigger: 'webhook:push' }, logger);
       } catch (e) {

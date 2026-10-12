@@ -66,6 +66,8 @@ Install the app on the midstream repo and the downstream repo (each org installs
 > does not cover it. If you would rather not grant it, set `reconcile.report: none` in `chain.yml`: the
 > reconcile still runs and its findings are in the run log and `POST /admin/reconcile`, but no issue is
 > filed. Without the permission and with `report: issue`, sluice says so in the result and keeps going.
+> The same issue also reports a `chain.yml` that has stopped validating (see §8), so `report: none`
+> opts out of that as well.
 >
 > **Public app, private data:** a GitHub App can be installed on other accounts only if it is
 > public. Midstream and downstream in different orgs therefore forces the app to be public, which
@@ -156,7 +158,14 @@ Validation is strict, and errors carry `line:col`:
 - `secrets:` takes **names only**; there is no key that can hold a value.
 - Sync branches must start with `chain/` and can never equal a tracked branch.
 - A PR that touches `chain.yml` gets one comment with any errors (updated in place; ✅ when fixed).
-  Invalid configs are also written to the run log, and the chain is skipped until fixed.
+- A file that **stops validating by other means** (a direct push, a hand edit, a schema change after an
+  upgrade) pauses the chain: nothing syncs or applies until it is fixed. It is written to the run log
+  and, with `reconcile.report: issue` (the default), shown in the drift issue with every error's
+  `line:col` (§8). The issue closes itself once the file is valid.
+- Error text never quotes what you typed. A key is named only when it is one of the schema's own words
+  or a near-miss of one (`did you mean …`); any other key, and every YAML syntax error, is reported by
+  position (`line:col`) with fixed wording, so a value pasted into the wrong place cannot come back out
+  in an issue, a PR comment or the run log.
 - Cross-field checks (duplicate repos, branch clashes…) are reported once the field-level errors
   are fixed, because the schema library only runs them on otherwise-valid input.
 
@@ -434,6 +443,32 @@ With `report: issue`, findings are kept in **one issue** in the midstream repo, 
 Needs the Issues permission (see registration). Each reconcile is also recorded in the run log
 (`outcome`: `reconcile_clean`, `reconcile_findings` or `reconcile_partial`, with counts per kind).
 
+### When chain.yml itself is invalid
+
+A reconcile needs a readable config, so a chain whose file stops validating is skipped by the scan and
+by pushes, and used to leave only a log line. It now goes into the **same issue**: found at the next
+hourly scan, or immediately when a push to the default branch changed the file, with each error's
+`line:col` and any did-you-mean.
+
+- **Opting out.** An unreadable file cannot say `reconcile.report: none`, so sluice takes the setting
+  from whatever it can still read: if the file is valid YAML and says `report: none`, nothing is filed
+  (the run log still has it). A file that is not even valid YAML reports, since it can say nothing.
+  `reconcile.enabled: false` does **not** opt out: it switches the drift check off, not this.
+  The label (`issue_label`) and the assignees are read the same way, each falling back to its default
+  when it is not usable.
+- **While it is broken** the issue body is the config error list only; drift findings from before are
+  not shown, because they were judged against a config sluice can no longer read.
+- **When fixed** the scan (or the push that fixes it) closes that issue with a comment, and makes the
+  reconcile due so drift is checked in the same tick instead of up to a day later. Only a report that
+  carries the config marker is closed this way; a drift report is left to the reconcile.
+- **No Issues permission:** one warning per attempt, `report: failed` in the run row, no crash, and the
+  rest of the scan carries on. On healthy chains the check for a stale report fails at debug level.
+- **Cost:** one issue listing per valid chain per scan (a read, never a write unless something changed).
+  A chain that set `report: none` makes no issue calls at all.
+- **Known edge:** if the label itself is what is broken in the file, the report is filed under the
+  default label and, once the file is fixed with a custom label, is not found by that label to close.
+  Close it by hand.
+
 ## 9. Threat model
 
 | Threat | Mitigation |
@@ -448,6 +483,7 @@ Needs the Issues permission (see registration). Each reconcile is also recorded 
 | **A secret value reaching storage** | There is no code path that writes it: not D1 (the run log records names, repos and outcomes), not KV (unused), not a Worker secret. |
 | **A secret value reaching GitHub in the clear** | Only the sealed-box ciphertext is sent; the plaintext is never in a request. |
 | A secret value in a response | Responses carry per-target results only; validation errors name fields, never values; `Cache-Control: no-store`. |
+| A value pasted into the wrong place in `chain.yml` reaching an issue, PR comment or run log | Config errors carry only schema words, near-misses and fixed wording (§4), never the typed text. `test/config-redaction.test.ts` puts a marker in every string field and key of the example config, and in the YAML cases where the parser library quotes its source, and requires it never to come back. |
 
 Each of the last four rows is a test, not a promise: `test/secrets.test.ts` captures every log line,
 every D1-bound row, every argument of every call made to GitHub and every response, and searches them
@@ -472,7 +508,7 @@ cached in isolate memory only, and live ~1 hour.
 ## 10. Development
 
 ```bash
-npm test               # vitest: ~410 tests, no network, no Cloudflare account
+npm test               # vitest: ~480 tests, no network, no Cloudflare account
 npm run typecheck
 npx wrangler dev       # local workerd; put dev secrets in .dev.vars (git-ignored)
 ```
@@ -495,7 +531,8 @@ and one real sync on a throwaway chain before relying on them:
   through the Git Data API and only becomes reachable once merged into the sync branch), and the Git
   Data endpoints (`git/commits`, `git/trees`) resolving a parent-repo SHA through the fork;
 - *(step 7)* `GET /repos/{o}/{r}/actions/secrets` returning `updated_at` as assumed (documented, but not
-  exercised live), and the Issues permission behaving as described when absent;
+  exercised live), and the Issues permission behaving as described when absent (listing and creating
+  issues both refused with 403/404, which the invalid-config report also relies on to stay quiet);
 - *(step 6)* GitHub accepting a Git Data API commit that adds or changes `.github/workflows/*.yml` (and
   what it says without the Workflows permission), and signing a commit that sets no author;
 - *(step 5)* GitHub accepting the sealed-box ciphertext for `PUT .../actions/secrets/{name}`. It is

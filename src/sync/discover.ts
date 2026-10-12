@@ -7,6 +7,8 @@ import type { PortFactory } from '../github/ports';
 import { errorFields } from '../log';
 import type { Logger } from '../log';
 import { isOwnerAllowed } from '../policy';
+import { clearInvalidConfigReport, reportDetail, reportInvalidConfig } from '../reconcile/invalid-config';
+import type { ReportOutcome } from '../reconcile/report';
 import type { Store } from '../store/types';
 
 export interface InstallationInfo {
@@ -57,17 +59,27 @@ export async function discoverChains(deps: DiscoveryDeps): Promise<DiscoveredCha
       if (loaded.status === 'invalid') {
         logger.warn('chain.yml invalid; chain skipped', { repo: fullName(holder), errors: formatIssues(loaded.errors) });
         const at = deps.now().toISOString();
-        await deps.store.recordRun({
-          startedAt: at,
-          finishedAt: at,
-          trigger: 'discovery',
-          chain: fullName(holder),
-          hop: 'config',
-          outcome: 'config_invalid',
-          detail: { errors: loaded.errors.map((e) => ({ path: e.path, line: e.line, message: e.message })) },
-        });
+        let report: ReportOutcome | undefined;
+        try {
+          report = await reportInvalidConfig(port, holder, loaded, logger);
+        } finally {
+          await deps.store.recordRun({
+            startedAt: at,
+            finishedAt: at,
+            trigger: 'discovery',
+            chain: fullName(holder),
+            hop: 'config',
+            outcome: 'config_invalid',
+            detail: {
+              errors: loaded.errors.map((e) => ({ path: e.path, line: e.line, message: e.message })),
+              ...reportDetail(report),
+            },
+          });
+        }
         return;
       }
+      // Readable again: close the report written while it was not (a read, and nothing else, if there is none).
+      await clearInvalidConfigReport(port, deps.store, holder, loaded.config, logger);
       found.push({ holder, installationId, config: loaded.config });
     } catch (e) {
       // One unreadable repo must not stop the scan, except rate limits, which the caller handles.
