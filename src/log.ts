@@ -19,6 +19,12 @@ export interface Logger {
   warn(msg: string, fields?: Record<string, unknown>): void;
   error(msg: string, fields?: Record<string, unknown>): void;
   child(fields: Record<string, unknown>): Logger;
+  /**
+   * A logger that additionally strips these exact values from every message and field, wherever they
+   * appear (an error message, a URL, a nested object). For request-scoped secrets: key-name redaction
+   * cannot know that an arbitrary string IS a secret, this can.
+   */
+  withSecrets(values: readonly string[]): Logger;
 }
 
 export type LogSink = (line: string) => void;
@@ -42,26 +48,35 @@ const SENSITIVE_PATTERNS: RegExp[] = [
 const MAX_DEPTH = 6;
 const MAX_STRING = 2000;
 
-export function scrubString(input: string): string {
+/** Replace every occurrence of each known secret VALUE (exact match), longest first. */
+function scrubExact(input: string, secrets: readonly string[]): string {
   let out = input;
+  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+    if (secret) out = out.split(secret).join(REDACTED);
+  }
+  return out;
+}
+
+export function scrubString(input: string, secrets: readonly string[] = []): string {
+  let out = secrets.length > 0 ? scrubExact(input, secrets) : input;
   for (const re of SENSITIVE_PATTERNS) out = out.replace(re, REDACTED);
   return out.length > MAX_STRING ? `${out.slice(0, MAX_STRING)}…[truncated]` : out;
 }
 
 /** Deep-copy `value` with sensitive keys dropped and token-shaped strings scrubbed. */
-export function redact(value: unknown, depth = 0): unknown {
+export function redact(value: unknown, depth = 0, secrets: readonly string[] = []): unknown {
   if (value === null || value === undefined) return value;
-  if (typeof value === 'string') return scrubString(value);
+  if (typeof value === 'string') return scrubString(value, secrets);
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value === 'bigint') return value.toString();
-  if (value instanceof Error) return errorFields(value);
+  if (value instanceof Error) return redact(errorFields(value), depth + 1, secrets);
   if (depth >= MAX_DEPTH) return '[max-depth]';
   if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return `[binary ${(value as ArrayBufferView).byteLength ?? (value as ArrayBuffer).byteLength} bytes]`;
-  if (Array.isArray(value)) return value.slice(0, 50).map((v) => redact(v, depth + 1));
+  if (Array.isArray(value)) return value.slice(0, 50).map((v) => redact(v, depth + 1, secrets));
   if (typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = SENSITIVE_KEY.test(k) ? REDACTED : redact(v, depth + 1);
+      out[k] = SENSITIVE_KEY.test(k) ? REDACTED : redact(v, depth + 1, secrets);
     }
     return out;
   }
@@ -89,6 +104,7 @@ export interface LoggerOptions {
   sink?: LogSink;
   base?: Record<string, unknown>;
   now?: () => Date;
+  secrets?: readonly string[];
 }
 
 export function parseLogLevel(raw: string | undefined): LogLevel {
@@ -101,14 +117,15 @@ export function createLogger(opts: LoggerOptions = {}): Logger {
   const sink: LogSink = opts.sink ?? ((line) => console.log(line));
   const now = opts.now ?? (() => new Date());
   const base = opts.base ?? {};
+  const secrets = opts.secrets ?? [];
 
   const emit = (lvl: LogLevel, msg: string, fields?: Record<string, unknown>) => {
     if (LEVEL_ORDER[lvl] < LEVEL_ORDER[level]) return;
     const record = {
       ts: now().toISOString(),
       level: lvl,
-      msg: scrubString(msg),
-      ...(redact({ ...base, ...fields }) as Record<string, unknown>),
+      msg: scrubString(msg, secrets),
+      ...(redact({ ...base, ...fields }, 0, secrets) as Record<string, unknown>),
     };
     sink(JSON.stringify(record));
   };
@@ -119,6 +136,7 @@ export function createLogger(opts: LoggerOptions = {}): Logger {
     warn: (m, f) => emit('warn', m, f),
     error: (m, f) => emit('error', m, f),
     child: (fields) => createLogger({ ...opts, base: { ...base, ...fields } }),
+    withSecrets: (values) => createLogger({ ...opts, secrets: [...secrets, ...values.filter(Boolean)] }),
   };
 }
 
@@ -129,6 +147,9 @@ export const nullLogger: Logger = {
   warn() {},
   error() {},
   child() {
+    return nullLogger;
+  },
+  withSecrets() {
     return nullLogger;
   },
 };

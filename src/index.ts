@@ -7,7 +7,9 @@ import { GitHubApp } from './github/client';
 import { octokitDiscovery, octokitPortFactory } from './github/ports';
 import { createLogger } from './log';
 import { D1Store } from './store/d1';
-import { runAdminSync } from './sync/admin';
+import { distributeSecret } from './secrets/distribute';
+import { NaclSealer } from './secrets/sealer';
+import { runAdminSync, runAdminVariables } from './sync/admin';
 import type { PollDeps } from './sync/poll';
 import { pollUpstreams } from './sync/poll';
 
@@ -28,6 +30,7 @@ function getRuntime(env: Env): Runtime {
   const now = () => new Date();
   const ports = octokitPortFactory(github);
   const chainDeps = { ports, store, now, allowedOwners: config.allowedOwners };
+  const sealer = new NaclSealer();
 
   cached = {
     poll: {
@@ -43,6 +46,8 @@ function getRuntime(env: Env): Runtime {
       describeApp: () => github.describe(),
       handleEvent: createEventHandler(chainDeps),
       runSync: (input) => runAdminSync(chainDeps, input, logger),
+      submitSecret: (input) => distributeSecret({ ...chainDeps, sealer }, input, logger),
+      runVariables: (input) => runAdminVariables(chainDeps, input, logger),
     },
   };
   return cached;

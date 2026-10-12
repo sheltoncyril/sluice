@@ -27,12 +27,12 @@ This repo is being built in reviewable steps.
 | 1 | Scaffold: Worker, Hono, webhook verification, App JWT + installation tokens | ✅ built |
 | 2 | `chain.yml` parsing and validation | ✅ built |
 | 3 | Hop sync (cron upstream→midstream, webhook midstream→downstream) | ✅ built, merged |
-| 4 | Conflict handling (label / comment / assign) and protected paths | ✅ built, **awaiting your review** |
-| 5 | Secret / variable pass-through distribution | ⏳ not built |
+| 4 | Conflict handling (label / comment / assign) and protected paths | ✅ built, merged |
+| 5 | Secret / variable pass-through distribution | ✅ built, **awaiting your review** |
 | 6 | Workflow template PRs | ⏳ not built |
 | 7 | Drift reconcile | ⏳ not built |
 
-Everything below is accurate for steps 1–4. Sections marked *(planned)* describe design intent only.
+Everything below is accurate for steps 1–5. Sections marked *(planned)* describe design intent only.
 
 ---
 
@@ -116,11 +116,14 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" https://<worker>/admin/whoami
 proves the key, App ID and runtime crypto all work. Also use GitHub's *Advanced → Recent
 deliveries* page to confirm the webhook returns `202`.
 
-**Plan:** this needs no WASM, so the **Workers Free plan** is expected to suffice for steps 1–3
-(JWT signing is WebCrypto, not libsodium). The libsodium sealed box arrives in step 5; if its WASM
-start-up exceeds the free CPU limit, the plan is the $5 Workers plan or a pure-JS sealed box
-behind the same interface. Nothing in `src/` outside `index.ts` and `store/d1.ts` imports a
-Workers-only API, so a plain Node server (SQLite `Store`) remains an option.
+**Plan and CPU.** Secrets are sealed with a **pure-JS** sealed box (tweetnacl + blakejs), not libsodium:
+`libsodium-wrappers` cannot run on Workers (it asks for random bytes at import time and instantiates
+WASM from bytes at runtime, which Workers refuse with `Wasm code generation disallowed by embedder`;
+I confirmed both in real workerd). libsodium stays a **test-only** dependency, used as an independent
+oracle. A seal costs about **2 ms of CPU** warm (measured in Node; a cold isolate is slower), so a
+submission to two repos lands near the Workers **Free** plan's 10 ms CPU limit. If submissions fail
+with a CPU-limit error, move to the $5 Workers plan. Nothing in `src/` outside `index.ts` and
+`store/d1.ts` imports a Workers-only API, so a plain Node server (SQLite `Store`) remains an option.
 
 ## 4. `.github/chain.yml`
 
@@ -272,44 +275,103 @@ npx wrangler tail          # structured JSON logs
 Outcomes: `up_to_date`, `pr_opened`, `pr_updated`, `pr_unchanged`, `stale_pr_closed`,
 `skipped_rejected`, `conflict`, `rate_limited`, `error`, `dry_run`.
 
-## 6. Submitting a secret *(planned: step 5)*
+## 6. Secrets and variables
 
-Not built yet. Design for review:
+### Declare them in `chain.yml`
 
-1. `POST` a value once to an authenticated endpoint (Cloudflare Access in front, plus the bearer token).
-2. For each target repo listed in `chain.yml`, fetch its Actions public key, seal the value into a
-   libsodium sealed box, `PUT` it, and drop the value. No D1, no KV, no logs, no Worker secret.
-3. The request body is never logged; the value never appears in a URL (Workers Logs record URLs).
-4. Secrets are write-only on GitHub, so drift checks (step 7) can only compare names and
-   `updated_at`, never values. **Rotation means re-submitting the value.**
+```yaml
+variables:                # non-sensitive; values live in the file
+  - name: DEPLOY_REGION
+    value: eu-west-1
+    targets: [downstream]
+
+secrets:                  # NAMES ONLY; there is no key that can hold a value
+  - name: NPM_TOKEN
+    targets: [midstream, downstream]
+```
+
+### Submit a secret (once)
+
+```bash
+# jq builds the JSON, so quotes, backslashes and newlines in the value are escaped correctly.
+jq -n --arg value "$(pbpaste)" '{chain: "my-org/widget", name: "NPM_TOKEN", value: $value}' \
+  | curl -s -X POST https://<worker>/admin/secrets \
+      -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" -d @-
+```
+
+(Taking the value from the clipboard or a file, as above, keeps it out of your shell history.)
+The response lists each target as `created`, `updated`, `error` or `skipped`, and **never** echoes the
+value. `207` means some targets failed (re-submit to finish), `502` means none were written.
+
+What happens, in this request only: the Worker fetches each target repo's Actions **public key**, seals
+the value to it (libsodium-compatible sealed box), `PUT`s the ciphertext, and drops the value. Only
+names declared under `secrets:` can be submitted, only to the targets declared for them. Downstream
+may be in another org: it needs its own installation, and its owner must be on `ALLOWED_OWNERS`.
+
+**Rotation is re-submission.** Secrets are write-only on GitHub: you can set one but never read it back.
+So sluice can never verify a value, only that a name exists and when it was last updated; drift checks
+(step 7) can compare names and `updated_at`, nothing else. To rotate, submit the new value again.
+
+### Variables
+
+Variables are applied **directly** (no PR): `chain.yml` on midstream's default branch is the thing you
+reviewed and merged. They are applied when a push to the default branch changes `chain.yml`, and on
+demand:
+
+```bash
+curl -s -X POST https://<worker>/admin/variables -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"chain":"my-org/widget","dry_run":true}'     # shows create / update / unchanged per repo
+```
+
+Only declared names are touched, a variable that already matches costs no writes, and values are
+not written to the run log (names and actions only).
+
+### Protecting the endpoint
+
+The bearer token (≥ 24 chars, constant-time compare) is the application-level check. Also put
+**Cloudflare Access** in front of the route so unauthenticated traffic never reaches the Worker, and
+**disable the `*.workers.dev` route** (or protect it too): an Access policy on a custom domain does not
+cover the workers.dev hostname. Add a WAF rate-limit rule on `/admin/*`.
 
 ## 7. Threat model
-
-What exists today (steps 1–3):
 
 | Threat | Mitigation |
 |---|---|
 | Forged webhooks | `X-Hub-Signature-256` verified over the raw bytes with WebCrypto (constant-time) *before* anything parses the body. 401 otherwise. |
 | Replays / redeliveries | De-duplicated by `X-GitHub-Delivery`; a *failed* delivery can be redelivered to retry. All handlers are idempotent regardless. |
 | A stranger installs your public app | `ALLOWED_OWNERS` is checked on every webhook, every cron scan, every admin call, and for the downstream owner. Empty list = refuse everything. Installations outside it are logged as warnings. |
-| A midstream owner points `downstream:` at someone else's repo | Downstream owner must be allowlisted. |
+| A midstream owner points `downstream:` at someone else's repo | Downstream owner must be allowlisted (also for secrets and variables). |
 | Bug or config writes to a real branch | Sync/workflow branches must be `chain/*` (schema) and the port guard rejects any ref write elsewhere (code). Nothing merges PRs. |
-| Secrets in logs | Logger redacts by key name and by token-shaped value (GitHub tokens, JWTs, PEM keys, `Bearer …`, signatures); request bodies are never logged; errors are logged as name/message/status only. |
 | Admin endpoint guessing | Bearer token compared in constant time; put Cloudflare Access / a WAF rate-limit rule in front. |
+| **A secret value reaching a log** | Request bodies are never logged. The value is never in a URL or header (the route is POST-only and a value in a query string is ignored). Every error from sealing or from GitHub is logged as name/message/status only, **and** the logger for that request additionally strips the *exact value* from anything it prints, so even a library that quotes its input cannot leak it. |
+| **A secret value reaching storage** | There is no code path that writes it: not D1 (the run log records names, repos and outcomes), not KV (unused), not a Worker secret. |
+| **A secret value reaching GitHub in the clear** | Only the sealed-box ciphertext is sent; the plaintext is never in a request. |
+| A secret value in a response | Responses carry per-target results only; validation errors name fields, never values; `Cache-Control: no-store`. |
+
+Each of the last four rows is a test, not a promise: `test/secrets.test.ts` captures every log line,
+every D1-bound row, every argument of every call made to GitHub and every response, and searches them
+for the value in raw, base64 and hex form, including when dependencies deliberately **echo the value
+in their error messages**. I also checked it against five deliberate leaks (an unscrubbed logger, an
+unscrubbed response, a debug line, the value in the run log, plaintext sent instead of ciphertext);
+each makes a test fail. Finally, the real Worker in workerd was sent a secret and its log, D1 and
+response searched: zero occurrences.
+
+**What this does *not* protect against.** The plaintext is in the Worker's memory for the duration of
+one request, and Cloudflare terminates TLS, so Cloudflare can in principle see it. JavaScript strings
+cannot be wiped, so the value lingers until garbage collection (the byte copies and the ephemeral key
+are zeroed). Anyone who can deploy code to the Worker, or read its secrets, can change it to capture
+values, and can act as the app on every installed repo, so protect your Cloudflare account and
+GitHub App credentials. Anyone with the admin token can submit secrets for declared names. A value
+sealed to a repo's key is readable by every workflow in that repo, as with any Actions secret.
 
 Credentials the Worker itself must hold (unavoidable): `GITHUB_APP_PRIVATE_KEY`,
 `GITHUB_WEBHOOK_SECRET`, `ADMIN_TOKEN`, as Worker secrets. Installation tokens are minted per use,
-cached in isolate memory only, and live ~1 hour. Anyone who can read the Worker's secrets (or
-deploy code to it) can act as the app on every installed repo, so protect your Cloudflare account.
-
-*(planned, step 5)* The secret pass-through additionally exposes the plaintext value to the Worker
-process for the duration of one request, and to Cloudflare as the TLS terminator. It is not
-persisted by this code, but it is not protected from a compromised Worker deployment either.
+cached in isolate memory only, and live ~1 hour.
 
 ## 8. Development
 
 ```bash
-npm test               # vitest: ~250 tests, no network, no Cloudflare account
+npm test               # vitest: ~320 tests, no network, no Cloudflare account
 npm run typecheck
 npx wrangler dev       # local workerd; put dev secrets in .dev.vars (git-ignored)
 ```
@@ -331,4 +393,7 @@ and one real sync on a throwaway chain before relying on them:
 - *(step 4)* the Merges API accepting the **unreferenced restore commit** as `head` (it is created
   through the Git Data API and only becomes reachable once merged into the sync branch), and the Git
   Data endpoints (`git/commits`, `git/trees`) resolving a parent-repo SHA through the fork;
+- *(step 5)* GitHub accepting the sealed-box ciphertext for `PUT .../actions/secrets/{name}`. It is
+  checked against libsodium (GitHub's reference) in tests, and the 32-byte Curve25519 key format is
+  GitHub's documented one, but no secret was sent to the real API;
 - *(step 4)* `mergeable` becoming non-null within the polling budget (if not, the next run asks again).

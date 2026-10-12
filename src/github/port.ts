@@ -109,6 +109,28 @@ export interface PullMergeability {
   state: string;
 }
 
+/** The per-repo public key Actions secrets must be sealed to. */
+export interface ActionsPublicKey {
+  keyId: string;
+  /** base64 Curve25519 public key. */
+  key: string;
+}
+
+/** What GitHub will tell you about a secret: its name and timestamps. Never the value. */
+export interface ActionsSecretInfo {
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Variables are not secret: GitHub returns their values. */
+export interface ActionsVariable {
+  name: string;
+  value: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type MergeIntoResult =
   | { result: 'merged'; sha: string }
   | { result: 'up_to_date' }
@@ -160,6 +182,17 @@ export interface GitHubPort {
   createCommit(repo: RepoRef, commit: NewCommit): Promise<string>;
 
   getMergeability(repo: RepoRef, pullNumber: number): Promise<PullMergeability>;
+
+  /** Actions secrets. Write-only on GitHub: values can be set, never read back. */
+  getActionsPublicKey(repo: RepoRef): Promise<ActionsPublicKey>;
+  /** `encryptedValue` is base64 sealed-box ciphertext. Returns whether the secret was created or replaced. */
+  putActionsSecret(repo: RepoRef, name: string, encryptedValue: string, keyId: string): Promise<'created' | 'updated'>;
+  listActionsSecrets(repo: RepoRef): Promise<ActionsSecretInfo[]>;
+
+  /** Actions variables (non-sensitive). */
+  listActionsVariables(repo: RepoRef): Promise<ActionsVariable[]>;
+  createActionsVariable(repo: RepoRef, name: string, value: string): Promise<void>;
+  updateActionsVariable(repo: RepoRef, name: string, value: string): Promise<void>;
 
   addLabels(repo: RepoRef, issueNumber: number, labels: string[]): Promise<void>;
   /** Removes a label from an issue/PR; a label that is not there is not an error. */

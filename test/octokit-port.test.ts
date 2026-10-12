@@ -29,10 +29,13 @@ function port(routes: Array<[string, RegExp, Reply | ((s: Seen) => Reply)]>) {
     const hit = routes.find(([m, re]) => m === method && re.test(s.path));
     if (!hit) return new Response(JSON.stringify({ message: `unmocked ${method} ${s.path}` }), { status: 599 });
     const reply = typeof hit[2] === 'function' ? hit[2](s) : hit[2];
-    return new Response(reply.status === 204 ? null : JSON.stringify(reply.body ?? {}), {
+    const res = new Response(reply.status === 204 ? null : JSON.stringify(reply.body ?? {}), {
       status: reply.status,
       headers: { 'content-type': 'application/json', ...(reply.headers ?? {}) },
     });
+    // Real fetch responses carry their absolute URL (the paginate plugin reads it); synthetic ones do not.
+    Object.defineProperty(res, 'url', { value: String(input) });
+    return res;
   };
   const client = new ResilientOctokit({ request: { fetch }, resilience: { maxServerRetries: 0 } } as never);
   return { port: new OctokitPort(client), seen };
@@ -358,5 +361,55 @@ describe('OctokitPort: mergeability and labels', () => {
   it('pull request views carry their label names', async () => {
     const t = port([['GET', /\/pulls$/, { status: 200, body: [pr({ labels: [{ name: 'sluice' }, { name: 'sluice/conflict' }] })] }]]);
     expect((await t.port.findOpenPullRequest(repo, 'chain/sync-upstream', 'main'))?.labels).toEqual(['sluice', 'sluice/conflict']);
+  });
+});
+
+describe('OctokitPort: Actions secrets and variables', () => {
+  it('getActionsPublicKey maps key_id and key', async () => {
+    const t = port([['GET', /actions\/secrets\/public-key$/, { status: 200, body: { key_id: '012345', key: 'base64key==' } }]]);
+    expect(await t.port.getActionsPublicKey(repo)).toEqual({ keyId: '012345', key: 'base64key==' });
+  });
+
+  it('putActionsSecret sends ONLY ciphertext and key_id, and maps 201 / 204', async () => {
+    const created = port([['PUT', /actions\/secrets\/NPM_TOKEN$/, { status: 201, body: {} }]]);
+    expect(await created.port.putActionsSecret(repo, 'NPM_TOKEN', 'Y2lwaGVydGV4dA==', 'k1')).toBe('created');
+    expect(created.seen[0]!.body).toEqual({ encrypted_value: 'Y2lwaGVydGV4dA==', key_id: 'k1' });
+
+    const updated = port([['PUT', /actions\/secrets\/NPM_TOKEN$/, { status: 204 }]]);
+    expect(await updated.port.putActionsSecret(repo, 'NPM_TOKEN', 'x', 'k1')).toBe('updated');
+  });
+
+  it('listActionsSecrets returns names and timestamps (GitHub never returns values)', async () => {
+    const t = port([
+      ['GET', /actions\/secrets$/, { status: 200, body: { total_count: 1, secrets: [{ name: 'NPM_TOKEN', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-02-01T00:00:00Z' }] } }],
+    ]);
+    expect(await t.port.listActionsSecrets(repo)).toEqual([{ name: 'NPM_TOKEN', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-02-01T00:00:00Z' }]);
+  });
+
+  it('listActionsVariables returns values and asks for GitHub\'s maximum page size', async () => {
+    const t = port([
+      ['GET', /actions\/variables$/, { status: 200, body: { total_count: 1, variables: [{ name: 'REGION', value: 'eu', created_at: 'c', updated_at: 'u' }] } }],
+    ]);
+    expect(await t.port.listActionsVariables(repo)).toEqual([{ name: 'REGION', value: 'eu', createdAt: 'c', updatedAt: 'u' }]);
+    expect(t.seen[0]!.query.get('per_page')).toBe('30');
+  });
+
+  it('createActionsVariable POSTs name and value, and falls back to PATCH if it lost a race', async () => {
+    const ok = port([['POST', /actions\/variables$/, { status: 201, body: {} }]]);
+    await ok.port.createActionsVariable(repo, 'REGION', 'eu');
+    expect(ok.seen[0]!.body).toEqual({ name: 'REGION', value: 'eu' });
+
+    const raced = port([
+      ['POST', /actions\/variables$/, { status: 409, body: { message: 'Already exists' } }],
+      ['PATCH', /actions\/variables\/REGION$/, { status: 204 }],
+    ]);
+    await raced.port.createActionsVariable(repo, 'REGION', 'eu');
+    expect(raced.seen.map((s) => s.method)).toEqual(['POST', 'PATCH']);
+  });
+
+  it('updateActionsVariable PATCHes the named variable', async () => {
+    const t = port([['PATCH', /actions\/variables\/REGION$/, { status: 204 }]]);
+    await t.port.updateActionsVariable(repo, 'REGION', 'us');
+    expect(t.seen[0]!.body).toEqual({ value: 'us' }); // `name` is the URL path parameter, not a body field
   });
 });

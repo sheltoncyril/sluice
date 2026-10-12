@@ -64,6 +64,12 @@ async function onPullRequest(
   logger.info('pull_request processed', { repo: `${repo.owner}/${repo.repo}`, pr: payload.pull_request.number, outcome });
 }
 
+/** GitHub caps `commits` at 20 per push; a full page may be truncated, so report "unknown" (null). */
+function changedPaths(commits: Array<{ added?: string[]; modified?: string[]; removed?: string[] }> | undefined): string[] | null {
+  if (!commits || commits.length === 0 || commits.length >= 20) return null;
+  return [...new Set(commits.flatMap((c) => [...(c.added ?? []), ...(c.modified ?? []), ...(c.removed ?? [])]))];
+}
+
 async function onPush(
   deps: EventHandlerDeps,
   deliveryId: string,
@@ -81,7 +87,15 @@ async function onPush(
 
   const result = await syncDownstreamOnPush(
     deps,
-    { deliveryId, installationId, repo: { owner, repo: payload.repository.name }, ref: payload.ref, deleted: payload.deleted },
+    {
+      deliveryId,
+      installationId,
+      repo: { owner, repo: payload.repository.name },
+      ref: payload.ref,
+      deleted: payload.deleted,
+      defaultBranch: payload.repository.default_branch,
+      changedPaths: changedPaths(payload.commits),
+    },
     logger,
   );
   if (result) logger.info('push processed', { chain: result.chain, hop: result.hop, outcome: result.outcome, pr: result.prNumber });
