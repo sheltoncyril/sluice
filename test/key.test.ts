@@ -42,7 +42,7 @@ describe('private key handling', () => {
   });
 
   it('convert-private-key.mjs turns PKCS#1 into an importable PKCS#8 key', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'chain-sync-key-'));
+    const dir = mkdtempSync(join(tmpdir(), 'sluice-key-'));
     const input = join(dir, 'app.pem');
     writeFileSync(input, keys.pkcs1);
     const out = execFileSync('node', ['scripts/convert-private-key.mjs', input], { encoding: 'utf8' });
@@ -53,7 +53,7 @@ describe('private key handling', () => {
   });
 
   it('convert-private-key.mjs passes PKCS#8 through (idempotent)', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'chain-sync-key-'));
+    const dir = mkdtempSync(join(tmpdir(), 'sluice-key-'));
     const input = join(dir, 'app8.pem');
     writeFileSync(input, keys.pkcs8);
     const out = execFileSync('node', ['scripts/convert-private-key.mjs', input], { encoding: 'utf8' });

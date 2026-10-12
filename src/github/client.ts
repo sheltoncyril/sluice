@@ -44,7 +44,7 @@ export class GitHubApp {
     this.privateKey = privateKey;
     const { logger, resilience } = opts;
     const Resilient = ResilientOctokit.defaults({
-      userAgent: 'chain-sync',
+      userAgent: 'sluice',
       resilience: {
         ...resilience,
         onRetry: (info: RetryInfo) => {

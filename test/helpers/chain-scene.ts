@@ -10,7 +10,7 @@ upstream:   { repo: ${opts.up ?? 'acme/widget'} }
 midstream:  { repo: ${opts.mid ?? 'me/widget'} }
 downstream: { repo: ${opts.down ?? 'other/deploy'} }
 pull_requests:
-  labels: [chain-sync]
+  labels: [sluice]
   reviewers: [octocat]
   assignees: [octocat]
 ${opts.extra ?? ''}`;

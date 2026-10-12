@@ -16,10 +16,10 @@ export interface SyncMarker {
   source: string;
 }
 
-const MARKER_RE = /<!--\s*chain-sync:v1\s+hop=(upstream_to_midstream|midstream_to_downstream)\s+source=([0-9a-f]{40})\s*-->/;
+const MARKER_RE = /<!--\s*sluice:v1\s+hop=(upstream_to_midstream|midstream_to_downstream)\s+source=([0-9a-f]{40})\s*-->/;
 
 export function renderMarker(m: SyncMarker): string {
-  return `<!-- chain-sync:v1 hop=${m.hop} source=${m.source} -->`;
+  return `<!-- sluice:v1 hop=${m.hop} source=${m.source} -->`;
 }
 
 export function parseMarker(body: string | null | undefined): SyncMarker | null {

@@ -27,7 +27,7 @@ function scene(mergeMethod: MergeMethod = 'merge') {
     syncBranch: BRANCH,
     mergeMethod,
     protectedPaths: [],
-    pr: { labels: ['chain-sync'], assignees: ['octocat'], reviewers: ['octocat'], teamReviewers: [], draft: false },
+    pr: { labels: ['sluice'], assignees: ['octocat'], reviewers: ['octocat'], teamReviewers: [], draft: false },
   };
   const run = (opts: Partial<HopOptions> = {}, over: Partial<HopSpec> = {}) =>
     syncHop({ ...spec, ...over }, { sourcePort: gh, targetPort: gh, store, logger: nullLogger, now }, { trigger: 'cron', ...opts });
@@ -68,7 +68,7 @@ describe('hop sync: opening the PR', () => {
     expect(pr!.title).toBe('Sync acme/widget@main into main');
     expect(pr!.body).toContain('feat: change a');
     expect(parseMarker(pr!.body)).toEqual({ hop: 'upstream_to_midstream', source: upTip });
-    expect([...pr!.labels]).toEqual(['chain-sync']);
+    expect([...pr!.labels]).toEqual(['sluice']);
     expect([...pr!.assignees]).toEqual(['octocat']);
     expect([...pr!.reviewers]).toEqual(['octocat']);
   });
@@ -460,7 +460,7 @@ describe('PR marker', () => {
   it('ignores malformed or missing markers', () => {
     expect(parseMarker('')).toBeNull();
     expect(parseMarker(null)).toBeNull();
-    expect(parseMarker('<!-- chain-sync:v1 hop=bogus source=' + 'a'.repeat(40) + ' -->')).toBeNull();
-    expect(parseMarker('<!-- chain-sync:v1 hop=upstream_to_midstream source=short -->')).toBeNull();
+    expect(parseMarker('<!-- sluice:v1 hop=bogus source=' + 'a'.repeat(40) + ' -->')).toBeNull();
+    expect(parseMarker('<!-- sluice:v1 hop=upstream_to_midstream source=short -->')).toBeNull();
   });
 });

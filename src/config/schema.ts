@@ -132,7 +132,7 @@ const downstreamHop = z.strictObject({
 });
 
 const pullRequestsSchema = z.strictObject({
-  labels: z.array(labelSchema).default(['chain-sync']),
+  labels: z.array(labelSchema).default(['sluice']),
   assignees: z.array(loginSchema).default([]),
   reviewers: z.array(loginSchema).default([]),
   team_reviewers: z.array(teamSchema).default([]),
@@ -140,7 +140,7 @@ const pullRequestsSchema = z.strictObject({
 });
 
 const conflictsSchema = z.strictObject({
-  label: labelSchema.default('chain-sync/conflict'),
+  label: labelSchema.default('sluice/conflict'),
   comment: z.boolean().default(true),
   /** Falls back to pull_requests.reviewers, then pull_requests.assignees, when empty. */
   assignees: z.array(loginSchema).default([]),

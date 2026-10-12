@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "chain-sync",
+  "name": "sluice",
   "main": "src/index.ts",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -12,8 +12,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "chain-sync",
-      // Replace with the id printed by `wrangler d1 create chain-sync`.
+      "database_name": "sluice",
+      // Replace with the id printed by `wrangler d1 create sluice`.
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }

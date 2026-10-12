@@ -208,7 +208,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
       await out.createComment(
         target.repo,
         open.number,
-        `chain-sync: \`${target.branch}\` already contains \`${fullName(source.repo)}@${source.branch}\` (\`${short(sourceSha)}\`), ` +
+        `sluice: \`${target.branch}\` already contains \`${fullName(source.repo)}@${source.branch}\` (\`${short(sourceSha)}\`), ` +
           `so this PR is no longer needed. Closing it; a new one opens when the source moves again.`,
       );
       await out.updatePullRequest(target.repo, open.number, { state: 'closed' });
@@ -274,7 +274,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
         target.repo,
         spec.syncBranch,
         sourceSha,
-        `chain-sync: merge ${fullName(source.repo)}@${source.branch} (${short(sourceSha)}) into ${spec.syncBranch}`,
+        `sluice: merge ${fullName(source.repo)}@${source.branch} (${short(sourceSha)}) into ${spec.syncBranch}`,
       );
       if (merged.result === 'merged') branchChanged = true;
       if (merged.result === 'conflict') {
@@ -297,7 +297,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
       target.repo,
       spec.syncBranch,
       targetSha,
-      `chain-sync: merge ${target.branch} (${short(targetSha)}) into ${spec.syncBranch}`,
+      `sluice: merge ${target.branch} (${short(targetSha)}) into ${spec.syncBranch}`,
     );
     if (merged.result === 'merged') branchChanged = true;
     if (merged.result === 'conflict') conflicted = true;
