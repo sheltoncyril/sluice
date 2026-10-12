@@ -210,10 +210,10 @@ describe('OctokitPort: pull requests', () => {
     await t.port.requestReviewers(repo, 7, [], []);
     expect(t.seen).toHaveLength(0);
 
-    await t.port.addLabels(repo, 7, ['chain-sync']);
+    await t.port.addLabels(repo, 7, ['sluice']);
     await t.port.addAssignees(repo, 7, ['octocat']);
     await t.port.requestReviewers(repo, 7, ['octocat'], ['core']);
-    expect(t.seen.map((s) => s.body)).toEqual([{ labels: ['chain-sync'] }, { assignees: ['octocat'] }, { reviewers: ['octocat'], team_reviewers: ['core'] }]);
+    expect(t.seen.map((s) => s.body)).toEqual([{ labels: ['sluice'] }, { assignees: ['octocat'] }, { reviewers: ['octocat'], team_reviewers: ['core'] }]);
   });
 });
 

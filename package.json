@@ -1,5 +1,5 @@
 {
-  "name": "chain-sync",
+  "name": "sluice",
   "version": "0.1.0",
   "private": true,
   "description": "Serverless GitHub App that keeps an upstream → midstream → downstream repo chain in sync through PRs.",
@@ -11,8 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "d1:migrate:local": "wrangler d1 migrations apply chain-sync --local",
-    "d1:migrate:remote": "wrangler d1 migrations apply chain-sync --remote",
+    "d1:migrate:local": "wrangler d1 migrations apply sluice --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply sluice --remote",
     "convert-key": "node scripts/convert-private-key.mjs"
   },
   "engines": {

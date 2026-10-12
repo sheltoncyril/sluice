@@ -1,5 +1,5 @@
 # .github/chain.yml — lives in the MIDSTREAM repo's default branch.
-# chain-sync reads it at runtime through the GitHub API; nothing is cached or stored.
+# sluice reads it at runtime through the GitHub API; nothing is cached or stored.
 version: 1
 
 # upstream is third-party: public, read-only, the app is NOT installed there.
@@ -36,14 +36,14 @@ hops:
     protected_paths: []
 
 pull_requests:
-  labels: [chain-sync]
+  labels: [sluice]
   assignees: [octocat]
   reviewers: [octocat]
   team_reviewers: []
   draft: false
 
 conflicts:
-  label: chain-sync/conflict
+  label: sluice/conflict
   comment: true
   assignees: [octocat] # defaults to pull_requests.reviewers when empty
   request_review: true

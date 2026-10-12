@@ -7,7 +7,7 @@ import { formatIssuesMarkdown } from './parse';
 import { CONFIG_PATH } from './schema';
 
 /** Hidden marker so we update our one comment instead of stacking new ones. */
-export const CONFIG_COMMENT_MARKER = '<!-- chain-sync:config-validation -->';
+export const CONFIG_COMMENT_MARKER = '<!-- sluice:config-validation -->';
 
 export type PrValidationOutcome = 'not_affected' | 'deleted' | 'valid' | 'invalid';
 
@@ -56,7 +56,7 @@ export async function validateConfigOnPullRequest(
       CONFIG_COMMENT_MARKER,
       `### ❌ \`${CONFIG_PATH}\` is invalid`,
       '',
-      `chain-sync cannot use this configuration (checked at \`${headSha.slice(0, 7)}\`). Fix these and push again:`,
+      `sluice cannot use this configuration (checked at \`${headSha.slice(0, 7)}\`). Fix these and push again:`,
       '',
       formatIssuesMarkdown([...checked.errors, ...checked.warnings]),
     ].join('\n');

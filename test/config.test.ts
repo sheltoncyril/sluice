@@ -39,8 +39,8 @@ describe('chain.yml: accepting good configs', () => {
       protected_paths: [],
     });
     expect(c.hops.midstream_to_downstream.sync_branch).toBe('chain/sync-midstream');
-    expect(c.pull_requests).toMatchObject({ labels: ['chain-sync'], draft: false });
-    expect(c.conflicts).toMatchObject({ label: 'chain-sync/conflict', comment: true, request_review: true });
+    expect(c.pull_requests).toMatchObject({ labels: ['sluice'], draft: false });
+    expect(c.conflicts).toMatchObject({ label: 'sluice/conflict', comment: true, request_review: true });
     expect(c.workflows.branch).toBe('chain/workflows');
     expect(c.variables).toEqual([]);
     expect(c.secrets).toEqual([]);

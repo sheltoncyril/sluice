@@ -1,4 +1,4 @@
--- chain-sync D1 schema.
+-- sluice D1 schema.
 --
 -- D1 holds sync logs and idempotency bookkeeping ONLY. It must never hold secret values,
 -- tokens, or request bodies (see README "Threat model"). GitHub remains the source of truth for

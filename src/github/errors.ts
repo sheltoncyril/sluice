@@ -23,7 +23,7 @@ export class NoCommitsBetweenError extends Error {
 /** A write was attempted on a ref outside the chain/ namespace. Always a bug; never retried. */
 export class ProtectedBranchWriteError extends Error {
   constructor(operation: string, branch: string) {
-    super(`refusing ${operation} on "${branch}": chain-sync only writes to chain/* branches`);
+    super(`refusing ${operation} on "${branch}": sluice only writes to chain/* branches`);
     this.name = 'ProtectedBranchWriteError';
   }
 }

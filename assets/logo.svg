@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 112" width="400" height="112" role="img" aria-labelledby="t">
+  <title id="t">sluice</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(8 8) scale(0.75)">
+    <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+    <g fill="#fff"><rect x="10" y="30" width="22" height="16" rx="8"/><rect x="53" y="56" width="22" height="16" rx="8"/><rect x="96" y="82" width="22" height="16" rx="8"/></g>
+    <g fill="#fbbf24"><rect x="38" y="21" width="9" height="60" rx="4.5"/><rect x="81" y="47" width="9" height="60" rx="4.5"/></g>
+  </g>
+  <g transform="translate(124 24) scale(0.88)" fill="none" stroke="#0f172a" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M42 22C38 14 30 10 23 10C13 10 7 16 7 24C7 33 15 36 24 40C33 44 42 47 42 56C42 64 35 70 24 70C14 70 7 65 5 57"/>
+    <path transform="translate(64 0)" d="M0 -10V70"/>
+    <path transform="translate(88 0)" d="M0 10V46A24 24 0 0 0 48 46M48 10V70"/>
+    <path transform="translate(162 0)" d="M0 10V70"/>
+    <path transform="translate(184 0)" d="M47.7 20.7A27 30 0 1 0 47.7 59.3"/>
+    <path transform="translate(252 0)" d="M0 40H54A27 30 0 1 0 47.7 59.3"/>
+    <circle cx="162" cy="-8" r="6.5" fill="#0f172a" stroke="none"/>
+  </g>
+</svg>

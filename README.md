@@ -1,4 +1,9 @@
-# chain-sync
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo.svg" alt="sluice" width="360">
+  </picture>
+</h1>
 
 A serverless GitHub App (Cloudflare Workers, TypeScript, Hono, Octokit) that keeps a three-repo
 chain in sync:
@@ -45,6 +50,7 @@ GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App*
 | Subscribe to events | **Push**, **Pull request**. (`installation` and `installation_repositories` are delivered to every GitHub App automatically.) |
 | Where can this app be installed? | **Any account** if midstream and downstream are in different orgs (see note) |
 
+Under *Display information*, upload [`assets/logo-mark-512.png`](assets/logo-mark-512.png) as the app's logo.
 Then **Generate a private key** (downloads a `.pem`) and note the **App ID**.
 
 Install the app on the midstream repo and the downstream repo (each org installs it separately).
@@ -82,7 +88,7 @@ npm install                                  # .npmrc sets legacy-peer-deps (npm
 npx wrangler login
 
 # D1 (sync log + idempotency bookkeeping only)
-npx wrangler d1 create chain-sync            # copy the printed database_id into wrangler.jsonc
+npx wrangler d1 create sluice            # copy the printed database_id into wrangler.jsonc
 npm run d1:migrate:remote
 
 # Plain vars (wrangler.jsonc):
@@ -173,7 +179,7 @@ it is deliberately not included.
 **Merge methods.** `merge_method` is how *you* will merge that hop's PRs.
 - `merge`: "is the target behind?" is plain ancestry. **Use a merge commit.**
 - `squash` / `rebase`: the source commit never becomes an ancestor, so each sync PR carries a
-  hidden marker (`<!-- chain-sync:v1 hop=… source=<sha> -->`) and the last *merged* sync PR is the
+  hidden marker (`<!-- sluice:v1 hop=… source=<sha> -->`) and the last *merged* sync PR is the
   baseline. Don't delete that comment. Squash-merging also loses merge history, so later upstream
   edits to a file you already squashed can conflict.
 
