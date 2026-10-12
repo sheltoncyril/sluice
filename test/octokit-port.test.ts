@@ -29,16 +29,20 @@ function port(routes: Array<[string, RegExp, Reply | ((s: Seen) => Reply)]>) {
     const hit = routes.find(([m, re]) => m === method && re.test(s.path));
     if (!hit) return new Response(JSON.stringify({ message: `unmocked ${method} ${s.path}` }), { status: 599 });
     const reply = typeof hit[2] === 'function' ? hit[2](s) : hit[2];
-    return new Response(reply.status === 204 ? null : JSON.stringify(reply.body ?? {}), {
+    const res = new Response(reply.status === 204 ? null : JSON.stringify(reply.body ?? {}), {
       status: reply.status,
       headers: { 'content-type': 'application/json', ...(reply.headers ?? {}) },
     });
+    // Real fetch responses carry their absolute URL (the paginate plugin reads it); synthetic ones do not.
+    Object.defineProperty(res, 'url', { value: String(input) });
+    return res;
   };
   const client = new ResilientOctokit({ request: { fetch }, resilience: { maxServerRetries: 0 } } as never);
   return { port: new OctokitPort(client), seen };
 }
 
 const pr = (over: Record<string, unknown> = {}) => ({
+  created_at: '2026-01-01T00:00:00Z',
   number: 7,
   state: 'open',
   merged_at: null,
@@ -358,5 +362,119 @@ describe('OctokitPort: mergeability and labels', () => {
   it('pull request views carry their label names', async () => {
     const t = port([['GET', /\/pulls$/, { status: 200, body: [pr({ labels: [{ name: 'sluice' }, { name: 'sluice/conflict' }] })] }]]);
     expect((await t.port.findOpenPullRequest(repo, 'chain/sync-upstream', 'main'))?.labels).toEqual(['sluice', 'sluice/conflict']);
+  });
+});
+
+describe('OctokitPort: Actions secrets and variables', () => {
+  it('getActionsPublicKey maps key_id and key', async () => {
+    const t = port([['GET', /actions\/secrets\/public-key$/, { status: 200, body: { key_id: '012345', key: 'FAKE-PUBLIC-KEY' } }]]);
+    expect(await t.port.getActionsPublicKey(repo)).toEqual({ keyId: '012345', key: 'FAKE-PUBLIC-KEY' });
+  });
+
+  it('putActionsSecret sends ONLY ciphertext and key_id, and maps 201 / 204', async () => {
+    const created = port([['PUT', /actions\/secrets\/NPM_TOKEN$/, { status: 201, body: {} }]]);
+    expect(await created.port.putActionsSecret(repo, 'NPM_TOKEN', 'FAKE-CIPHERTEXT', 'k1')).toBe('created');
+    expect(created.seen[0]!.body).toEqual({ encrypted_value: 'FAKE-CIPHERTEXT', key_id: 'k1' });
+
+    const updated = port([['PUT', /actions\/secrets\/NPM_TOKEN$/, { status: 204 }]]);
+    expect(await updated.port.putActionsSecret(repo, 'NPM_TOKEN', 'x', 'k1')).toBe('updated');
+  });
+
+  it('listActionsSecrets returns names and timestamps (GitHub never returns values)', async () => {
+    const t = port([
+      ['GET', /actions\/secrets$/, { status: 200, body: { total_count: 1, secrets: [{ name: 'NPM_TOKEN', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-02-01T00:00:00Z' }] } }],
+    ]);
+    expect(await t.port.listActionsSecrets(repo)).toEqual([{ name: 'NPM_TOKEN', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-02-01T00:00:00Z' }]);
+  });
+
+  it('listActionsVariables returns values and asks for GitHub\'s maximum page size', async () => {
+    const t = port([
+      ['GET', /actions\/variables$/, { status: 200, body: { total_count: 1, variables: [{ name: 'REGION', value: 'eu', created_at: 'c', updated_at: 'u' }] } }],
+    ]);
+    expect(await t.port.listActionsVariables(repo)).toEqual([{ name: 'REGION', value: 'eu', createdAt: 'c', updatedAt: 'u' }]);
+    expect(t.seen[0]!.query.get('per_page')).toBe('30');
+  });
+
+  it('createActionsVariable POSTs name and value, and falls back to PATCH if it lost a race', async () => {
+    const ok = port([['POST', /actions\/variables$/, { status: 201, body: {} }]]);
+    await ok.port.createActionsVariable(repo, 'REGION', 'eu');
+    expect(ok.seen[0]!.body).toEqual({ name: 'REGION', value: 'eu' });
+
+    const raced = port([
+      ['POST', /actions\/variables$/, { status: 409, body: { message: 'Already exists' } }],
+      ['PATCH', /actions\/variables\/REGION$/, { status: 204 }],
+    ]);
+    await raced.port.createActionsVariable(repo, 'REGION', 'eu');
+    expect(raced.seen.map((s) => s.method)).toEqual(['POST', 'PATCH']);
+  });
+
+  it('updateActionsVariable PATCHes the named variable', async () => {
+    const t = port([['PATCH', /actions\/variables\/REGION$/, { status: 204 }]]);
+    await t.port.updateActionsVariable(repo, 'REGION', 'us');
+    expect(t.seen[0]!.body).toEqual({ value: 'us' }); // `name` is the URL path parameter, not a body field
+  });
+});
+
+describe('OctokitPort: workflow commits (content trees, app-signed commits)', () => {
+  it('createTree sends new text files as `content` (GitHub creates the blob), not as a sha', async () => {
+    const t = port([['POST', /git\/trees$/, { status: 201, body: { sha: 'newtree' } }]]);
+    await t.port.createTree(repo, 'base1', [{ path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: null, content: 'name: ci\n' }]);
+    expect(t.seen[0]!.body).toEqual({
+      base_tree: 'base1',
+      tree: [{ path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', content: 'name: ci\n' }],
+    });
+  });
+
+  it('createCommit with no identity sends neither author nor committer, so GitHub signs it as the app', async () => {
+    const t = port([['POST', /git\/commits$/, { status: 201, body: { sha: 'c1' } }]]);
+    await t.port.createCommit(repo, { message: 'm', treeSha: 'tree1', parents: ['p1'] });
+    expect(t.seen[0]!.body).toEqual({ message: 'm', tree: 'tree1', parents: ['p1'] });
+  });
+});
+
+describe('OctokitPort: issues (the drift report) and PR age', () => {
+  it('findOpenIssueByLabelMarker filters by label, skips pull requests, and requires the marker', async () => {
+    const t = port([
+      [
+        'GET',
+        /\/issues$/,
+        {
+          status: 200,
+          body: [
+            { number: 1, html_url: 'https://github.com/me/widget/pull/1', body: 'x <!-- marker --> y', pull_request: { url: 'u' } },
+            { number: 2, html_url: 'https://github.com/me/widget/issues/2', body: 'someone else\'s issue, same label' },
+            { number: 3, html_url: 'https://github.com/me/widget/issues/3', body: 'mine <!-- marker -->' },
+          ],
+        },
+      ],
+    ]);
+    const found = await t.port.findOpenIssueByLabelMarker(repo, 'sluice/drift', '<!-- marker -->');
+    expect(found).toEqual({ number: 3, htmlUrl: 'https://github.com/me/widget/issues/3', body: 'mine <!-- marker -->' });
+    expect(t.seen[0]!.query.get('labels')).toBe('sluice/drift');
+    expect(t.seen[0]!.query.get('state')).toBe('open');
+  });
+
+  it('findOpenIssueByLabelMarker returns null when nothing matches', async () => {
+    const t = port([['GET', /\/issues$/, { status: 200, body: [{ number: 2, html_url: 'u', body: 'no marker' }] }]]);
+    expect(await t.port.findOpenIssueByLabelMarker(repo, 'sluice/drift', '<!-- marker -->')).toBeNull();
+  });
+
+  it('createIssue sends title, body and labels', async () => {
+    const t = port([['POST', /\/issues$/, { status: 201, body: { number: 5, html_url: 'https://github.com/me/widget/issues/5', body: 'b' } }]]);
+    const issue = await t.port.createIssue(repo, { title: 'T', body: 'b', labels: ['sluice/drift'] });
+    expect(issue.number).toBe(5);
+    expect(t.seen[0]!.body).toEqual({ title: 'T', body: 'b', labels: ['sluice/drift'] });
+  });
+
+  it('updateIssue edits the body, and closing says it was completed', async () => {
+    const t = port([['PATCH', /\/issues\/5$/, { status: 200, body: {} }]]);
+    await t.port.updateIssue(repo, 5, { body: 'new' });
+    await t.port.updateIssue(repo, 5, { state: 'closed' });
+    expect(t.seen.map((s) => s.body)).toEqual([{ body: 'new' }, { state: 'closed', state_reason: 'completed' }]);
+  });
+
+  it('pull request views carry their creation time (for the stale-PR check)', async () => {
+    const t = port([['GET', /\/pulls$/, { status: 200, body: [pr({ created_at: '2026-10-01T00:00:00Z' })] }]]);
+    expect((await t.port.findOpenPullRequest(repo, 'chain/sync-upstream', 'main'))?.createdAt).toBe('2026-10-01T00:00:00Z');
   });
 });

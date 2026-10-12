@@ -1,5 +1,6 @@
 import picomatch from 'picomatch';
 import { z } from 'zod';
+import { BUILTIN_VARS } from '../workflows/render';
 
 /**
  * Schema for `.github/chain.yml` (lives in the midstream repo, read at runtime via the API).
@@ -180,6 +181,32 @@ const variableSchema = z.strictObject({
 const secretSchema = z.strictObject({
   name: actionsNameSchema,
   targets: targetsSchema,
+  /**
+   * Rotation policy. GitHub never reveals a secret, but it does say when it was last written; drift
+   * detection reports the secret once it is older than this. Unset = never reported as stale.
+   */
+  max_age_days: z
+    .number({ error: 'must be a number of days' })
+    .int('must be a whole number of days')
+    .min(1, 'must be at least 1')
+    .max(3650, 'must be at most 3650')
+    .optional(),
+});
+
+const reconcileSchema = z.strictObject({
+  enabled: z.boolean().default(true),
+  /** How often the scheduled reconcile runs for this chain (the cron ticks hourly; this only slows it). */
+  interval_hours: z
+    .number({ error: 'must be a number of hours' })
+    .int('must be a whole number of hours')
+    .min(1, 'must be at least 1')
+    .max(720, 'must be at most 720')
+    .default(24),
+  /** "issue": keep one self-updating issue in midstream (needs Issues: write). "none": run log only. */
+  report: z.enum(['issue', 'none'], { error: 'must be "issue" or "none"' }).default('issue'),
+  issue_label: labelSchema.default('sluice/drift'),
+  /** An open sync PR older than this is reported as stale. */
+  stale_pr_days: z.number().int().min(1).max(365).default(14),
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -214,6 +241,7 @@ export const chainConfigSchema = z
     workflows: workflowsSchema.prefault({}),
     variables: z.array(variableSchema).default([]),
     secrets: z.array(secretSchema).default([]),
+    reconcile: reconcileSchema.prefault({}),
   })
   .superRefine((cfg, ctx) => {
     const add = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
@@ -264,6 +292,13 @@ export const chainConfigSchema = z
     };
     seen(cfg.variables, 'variables');
     seen(cfg.secrets, 'secrets');
+
+    // Template values cannot shadow the built-ins (a template author must be able to trust {{ repo }}).
+    for (const key of Object.keys(cfg.workflows.values)) {
+      if ((BUILTIN_VARS as readonly string[]).includes(key)) {
+        add(['workflows', 'values', key], `"${key}" is a built-in template variable and cannot be redefined (built-ins: ${BUILTIN_VARS.join(', ')})`);
+      }
+    }
 
     // One workflow destination per target.
     const dest = new Set<string>();

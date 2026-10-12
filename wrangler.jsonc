@@ -5,8 +5,9 @@
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
 
-  // Hourly upstream poll. Per-chain `hops.upstream_to_midstream.poll_interval_minutes`
-  // in .github/chain.yml can only *slow this down* (it cannot run more often than the cron).
+  // One hourly tick drives everything scheduled: the upstream poll AND the drift reconcile. Per-chain
+  // `hops.upstream_to_midstream.poll_interval_minutes` and `reconcile.interval_hours` in
+  // .github/chain.yml can only *slow this down* (the reconcile defaults to daily).
   "triggers": { "crons": ["0 * * * *"] },
 
   "d1_databases": [

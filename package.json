@@ -25,15 +25,19 @@
     "@octokit/request-error": "^7.1.2",
     "@octokit/types": "^18.0.0",
     "@octokit/webhooks": "^14.2.0",
+    "blakejs": "^1.2.1",
     "hono": "^4.13.13",
     "picomatch": "^4.0.7",
+    "tweetnacl": "^1.0.3",
     "yaml": "^2.9.1",
     "zod": "^4.6.6"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261012.1",
+    "@types/libsodium-wrappers": "^0.7.14",
     "@types/node": "^22.20.5",
     "@types/picomatch": "^4.0.3",
+    "libsodium-wrappers": "^0.8.4",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0",
     "wrangler": "^4.149.0"

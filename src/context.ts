@@ -1,7 +1,15 @@
 import type { RuntimeConfig } from './env';
 import type { Logger } from './log';
 import type { Store } from './store/types';
-import type { AdminSyncInput, AdminSyncResponse } from './sync/admin';
+import type { SecretInput, SecretResponse } from './secrets/distribute';
+import type {
+  AdminSyncInput,
+  AdminSyncResponse,
+  AdminVariablesInput,
+  AdminVariablesResponse,
+  AdminReconcileResponse,
+  AdminWorkflowsResponse,
+} from './sync/admin';
 
 /** A verified GitHub webhook delivery. `payload` is untyped until a handler narrows it. */
 export interface WebhookEvent {
@@ -25,4 +33,15 @@ export interface AppContext {
   describeApp(): Promise<unknown>;
   /** Operator-triggered "sync this hop now" (optionally a dry run). */
   runSync(input: AdminSyncInput): Promise<AdminSyncResponse>;
+  /**
+   * Seal and write one secret to the targets chain.yml declares for it. The value exists only inside this
+   * call. Implementations must never persist or log it.
+   */
+  submitSecret(input: SecretInput): Promise<SecretResponse>;
+  /** Apply (or preview) the variables: block of chain.yml. */
+  runVariables(input: AdminVariablesInput): Promise<AdminVariablesResponse>;
+  /** Render the workflow templates and open/refresh the workflow PRs (or preview with dryRun). */
+  runWorkflows(input: AdminVariablesInput): Promise<AdminWorkflowsResponse>;
+  /** Run the drift reconcile now (or preview it with dryRun). */
+  runReconcile(input: AdminVariablesInput): Promise<AdminReconcileResponse>;
 }

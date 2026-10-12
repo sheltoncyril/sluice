@@ -7,7 +7,11 @@ import { GitHubApp } from './github/client';
 import { octokitDiscovery, octokitPortFactory } from './github/ports';
 import { createLogger } from './log';
 import { D1Store } from './store/d1';
-import { runAdminSync } from './sync/admin';
+import { distributeSecret } from './secrets/distribute';
+import { NaclSealer } from './secrets/sealer';
+import { reconcileAll } from './reconcile/schedule';
+import { runAdminReconcile, runAdminSync, runAdminVariables, runAdminWorkflows } from './sync/admin';
+import { discoverChains } from './sync/discover';
 import type { PollDeps } from './sync/poll';
 import { pollUpstreams } from './sync/poll';
 
@@ -28,6 +32,7 @@ function getRuntime(env: Env): Runtime {
   const now = () => new Date();
   const ports = octokitPortFactory(github);
   const chainDeps = { ports, store, now, allowedOwners: config.allowedOwners };
+  const sealer = new NaclSealer();
 
   cached = {
     poll: {
@@ -43,6 +48,10 @@ function getRuntime(env: Env): Runtime {
       describeApp: () => github.describe(),
       handleEvent: createEventHandler(chainDeps),
       runSync: (input) => runAdminSync(chainDeps, input, logger),
+      submitSecret: (input) => distributeSecret({ ...chainDeps, sealer }, input, logger),
+      runVariables: (input) => runAdminVariables(chainDeps, input, logger),
+      runWorkflows: (input) => runAdminWorkflows(chainDeps, input, logger),
+      runReconcile: (input) => runAdminReconcile(chainDeps, input, logger),
     },
   };
   return cached;
@@ -65,7 +74,21 @@ export default {
     const message = (e: unknown) => ({ message: e instanceof Error ? e.message : String(e) });
     ctx.waitUntil(
       (async () => {
-        await pollUpstreams(poll, logger).catch((e) => logger.error('scheduled poll failed', message(e)));
+        // One scan of installations per tick serves both the upstream poll and the reconcile.
+        const chains = await discoverChains({
+          api: poll.discovery,
+          ports: poll.ports,
+          store: poll.store,
+          now: poll.now,
+          allowedOwners: poll.allowedOwners,
+          ...(poll.onlyRepos ? { onlyRepos: poll.onlyRepos } : {}),
+          logger,
+        }).catch((e) => {
+          logger.error('discovery failed', message(e));
+          return [];
+        });
+        await pollUpstreams(poll, logger, { chains }).catch((e) => logger.error('scheduled poll failed', message(e)));
+        await reconcileAll(poll, chains, logger).catch((e) => logger.error('scheduled reconcile failed', message(e)));
         await store
           .prune(cutoff)
           .then((removed) => logger.info('pruned old rows', { removed }))

@@ -65,3 +65,44 @@ describe('redaction', () => {
     expect(lines).toHaveLength(1);
   });
 });
+
+describe('withSecrets: request-scoped exact-value scrubbing', () => {
+  const SECRET = 'not-token-shaped-secret-value';
+  const make = () => {
+    const lines: string[] = [];
+    return { lines, log: createLogger({ level: 'debug', sink: (l) => lines.push(l) }) };
+  };
+
+  it('strips the exact value from messages, fields, nested objects and errors, wherever it appears', () => {
+    const { lines, log } = make();
+    const scoped = log.withSecrets([SECRET]);
+    scoped.info(`hello ${SECRET} world`, {
+      note: `v=${SECRET}`,
+      nested: { deep: [`x${SECRET}y`] },
+      err: new Error(`failed with ${SECRET}`),
+    });
+    const line = lines.join('');
+    expect(line).not.toContain(SECRET);
+    expect(line).toContain('[redacted]');
+  });
+
+  it('survives child() and does not affect the parent logger', () => {
+    const { lines, log } = make();
+    log.withSecrets([SECRET]).child({ a: 1 }).info(`x ${SECRET}`);
+    expect(lines.join('')).not.toContain(SECRET);
+    log.info(`unscoped ${SECRET}`);
+    expect(lines.at(-1)).toContain(SECRET); // the base logger cannot know it is secret
+  });
+
+  it('scrubs the longest secret first when one contains another', () => {
+    const { lines, log } = make();
+    log.withSecrets(['abc', 'abcdef-long']).info('v=abcdef-long');
+    expect(lines.join('')).not.toContain('def-long');
+  });
+
+  it('ignores empty secrets instead of mangling every line', () => {
+    const { lines, log } = make();
+    log.withSecrets(['']).info('plain message');
+    expect(lines.join('')).toContain('plain message');
+  });
+});

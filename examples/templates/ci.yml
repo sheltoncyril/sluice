@@ -1,0 +1,22 @@
+# Example template: lives in the MIDSTREAM repo under workflows.templates_path (default "templates/").
+# sluice renders it for each target repo and opens a PR. GitHub's own expression syntax is left alone;
+# double-brace placeholders are filled in from the built-ins or `workflows.values` (this applies to
+# comments too, so use a backslash before the braces to write one literally).
+name: CI ({{ role }})
+
+on:
+  push:
+    branches: [{{ branch }}]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "{{ node_version }}"
+      - run: npm ci && npm test
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

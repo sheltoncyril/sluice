@@ -58,6 +58,8 @@ export interface PullRequest {
   body: string;
   /** Label names currently on the PR. */
   labels: string[];
+  /** ISO-8601 creation time. */
+  createdAt: string;
   headRef: string;
   /** Head commit when last seen (for a merged PR: the commit that was merged). */
   headSha: string;
@@ -87,26 +89,67 @@ export interface TreeEntry {
   sha: string;
 }
 
-/** One change to apply on top of a base tree. `sha: null` deletes the path. */
+/**
+ * One change to apply on top of a base tree. Either `sha` (an existing object; `null` deletes the path)
+ * or, for a new text file, `content` (GitHub creates the blob).
+ */
 export interface TreeChange {
   path: string;
   mode: string;
   type: 'blob' | 'commit';
   sha: string | null;
+  content?: string;
 }
 
 export interface NewCommit {
   message: string;
   treeSha: string;
   parents: string[];
-  /** Used for BOTH author and committer so the commit hash is fully determined by the inputs. */
-  identity: { name: string; email: string; date: string };
+  /**
+   * Used for BOTH author and committer so the commit hash is fully determined by the inputs. Omit it to
+   * let GitHub attribute the commit to the app, which signs it ("Verified").
+   */
+  identity?: { name: string; email: string; date: string };
 }
 
 /** GitHub's lazily computed answer to "can this PR be merged?". `mergeable: null` means "not computed yet". */
 export interface PullMergeability {
   mergeable: boolean | null;
   state: string;
+}
+
+/** The per-repo public key Actions secrets must be sealed to. */
+export interface ActionsPublicKey {
+  keyId: string;
+  /** base64 Curve25519 public key. */
+  key: string;
+}
+
+/** What GitHub will tell you about a secret: its name and timestamps. Never the value. */
+export interface ActionsSecretInfo {
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Variables are not secret: GitHub returns their values. */
+export interface ActionsVariable {
+  name: string;
+  value: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IssueRef {
+  number: number;
+  htmlUrl: string;
+  body: string;
+}
+
+export interface NewIssue {
+  title: string;
+  body: string;
+  labels: string[];
 }
 
 export type MergeIntoResult =
@@ -160,6 +203,22 @@ export interface GitHubPort {
   createCommit(repo: RepoRef, commit: NewCommit): Promise<string>;
 
   getMergeability(repo: RepoRef, pullNumber: number): Promise<PullMergeability>;
+
+  /** Actions secrets. Write-only on GitHub: values can be set, never read back. */
+  getActionsPublicKey(repo: RepoRef): Promise<ActionsPublicKey>;
+  /** `encryptedValue` is base64 sealed-box ciphertext. Returns whether the secret was created or replaced. */
+  putActionsSecret(repo: RepoRef, name: string, encryptedValue: string, keyId: string): Promise<'created' | 'updated'>;
+  listActionsSecrets(repo: RepoRef): Promise<ActionsSecretInfo[]>;
+
+  /** Actions variables (non-sensitive). */
+  listActionsVariables(repo: RepoRef): Promise<ActionsVariable[]>;
+  createActionsVariable(repo: RepoRef, name: string, value: string): Promise<void>;
+  updateActionsVariable(repo: RepoRef, name: string, value: string): Promise<void>;
+
+  /** Issues (the drift report). Requires the app's Issues permission. */
+  findOpenIssueByLabelMarker(repo: RepoRef, label: string, marker: string): Promise<IssueRef | null>;
+  createIssue(repo: RepoRef, issue: NewIssue): Promise<IssueRef>;
+  updateIssue(repo: RepoRef, issueNumber: number, patch: { title?: string; body?: string; state?: 'closed' }): Promise<void>;
 
   addLabels(repo: RepoRef, issueNumber: number, labels: string[]): Promise<void>;
   /** Removes a label from an issue/PR; a label that is not there is not an error. */

@@ -6,6 +6,7 @@ import { requireAdmin } from './http/auth';
 import { webhookHandler } from './http/webhook';
 import { createLogger, errorFields } from './log';
 import { z } from 'zod';
+import { MAX_SECRET_BYTES } from './secrets/distribute';
 
 export type ContextFactory = (env: Env) => AppContext;
 
@@ -68,6 +69,102 @@ export function createApp(contextFactory: ContextFactory): Hono<AppEnv> {
     } catch (e) {
       ctx.logger.error('admin sync failed', errorFields(e));
       return c.json({ error: 'sync failed; see logs' }, 500);
+    }
+  });
+
+  const variablesRequest = z.strictObject({ chain: z.string().min(3), dry_run: z.boolean().default(false) });
+
+  // Apply (or preview) the variables: block of chain.yml. Variables are not secret, so values are shown.
+  app.post('/admin/variables', async (c) => {
+    const ctx = c.get('ctx');
+    const parsed = variablesRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'expected {"chain":"owner/midstream","dry_run":false}' }, 400);
+    try {
+      const out = await ctx.runVariables({ chain: parsed.data.chain, dryRun: parsed.data.dry_run });
+      return out.ok ? c.json(out.result) : c.json({ error: out.error, ...(out.details ? { details: out.details } : {}) }, out.status);
+    } catch (e) {
+      ctx.logger.error('admin variables failed', errorFields(e));
+      return c.json({ error: 'applying variables failed; see logs' }, 500);
+    }
+  });
+
+  // Render the workflow templates and open/refresh the PRs (dry_run previews drift and writes nothing).
+  app.post('/admin/workflows', async (c) => {
+    const ctx = c.get('ctx');
+    const parsed = variablesRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'expected {"chain":"owner/midstream","dry_run":false}' }, 400);
+    try {
+      const out = await ctx.runWorkflows({ chain: parsed.data.chain, dryRun: parsed.data.dry_run });
+      return out.ok ? c.json(out.result) : c.json({ error: out.error, ...(out.details ? { details: out.details } : {}) }, out.status);
+    } catch (e) {
+      ctx.logger.error('admin workflows failed', errorFields(e));
+      return c.json({ error: 'workflow sync failed; see logs' }, 500);
+    }
+  });
+
+  // Run the drift reconcile now. dry_run reports drift and changes nothing.
+  app.post('/admin/reconcile', async (c) => {
+    const ctx = c.get('ctx');
+    const parsed = variablesRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'expected {"chain":"owner/midstream","dry_run":false}' }, 400);
+    try {
+      const out = await ctx.runReconcile({ chain: parsed.data.chain, dryRun: parsed.data.dry_run });
+      return out.ok ? c.json(out.result) : c.json({ error: out.error, ...(out.details ? { details: out.details } : {}) }, out.status);
+    } catch (e) {
+      ctx.logger.error('admin reconcile failed', errorFields(e));
+      return c.json({ error: 'reconcile failed; see logs' }, 500);
+    }
+  });
+
+  const secretRequest = z.strictObject({
+    chain: z.string().min(3).max(200),
+    name: z.string().min(1).max(100),
+    value: z.string().min(1),
+  });
+  const MAX_SECRET_BODY = MAX_SECRET_BYTES + 4096; // the value plus JSON framing
+
+  /**
+   * Submit a secret. THE value travels only in this request body (never the URL or a header: Workers
+   * Logs record URLs) and is handed to the sealer and dropped. Nothing here logs the body, echoes it,
+   * or puts it in an error message.
+   */
+  app.post('/admin/secrets', async (c) => {
+    const ctx = c.get('ctx');
+    c.header('Cache-Control', 'no-store');
+    if (!(c.req.header('content-type') ?? '').toLowerCase().startsWith('application/json')) {
+      return c.json({ error: 'content-type must be application/json' }, 415);
+    }
+    if (Number(c.req.header('content-length') ?? 0) > MAX_SECRET_BODY) return c.json({ error: 'request too large' }, 413);
+
+    const raw = await c.req.text();
+    if (raw.length > MAX_SECRET_BODY) return c.json({ error: 'request too large' }, 413);
+
+    let json: unknown;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      return c.json({ error: 'body is not valid JSON' }, 400); // no parser detail: it could quote the body
+    }
+    const parsed = secretRequest.safeParse(json);
+    if (!parsed.success) {
+      // Field names only; zod issues can carry the received value.
+      const fields = [...new Set(parsed.error.issues.map((i) => i.path.join('.') || '(body)'))];
+      return c.json({ error: `invalid request; check: ${fields.join(', ')}` }, 400);
+    }
+    if (new TextEncoder().encode(parsed.data.value).byteLength > MAX_SECRET_BYTES) {
+      return c.json({ error: 'secret value is larger than GitHub allows (48 KB)' }, 413);
+    }
+
+    try {
+      const out = await ctx.submitSecret(parsed.data);
+      if (out.ok) return c.json({ name: out.name, results: out.results });
+      return c.json(
+        { error: out.error, ...(out.results ? { results: out.results } : {}), ...(out.details ? { details: out.details } : {}) },
+        out.status,
+      );
+    } catch (e) {
+      ctx.logger.withSecrets([parsed.data.value]).error('secret submission failed', errorFields(e));
+      return c.json({ error: 'secret submission failed; see logs' }, 500);
     }
   });
 

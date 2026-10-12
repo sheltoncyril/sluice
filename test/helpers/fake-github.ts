@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
+import nacl from 'tweetnacl';
 import { CommitNotReachableError, NoCommitsBetweenError, TreeTooLargeError } from '../../src/github/errors';
 import type {
+  ActionsPublicKey,
+  IssueRef,
+  NewIssue,
+  ActionsSecretInfo,
+  ActionsVariable,
   CommitInfo,
   CompareResult,
   GitHubPort,
@@ -52,6 +58,15 @@ interface FakePr {
   assignees: Set<string>;
   reviewers: Set<string>;
   draft: boolean;
+  createdAt: string;
+}
+
+interface FakeIssue {
+  number: number;
+  title: string;
+  body: string;
+  labels: Set<string>;
+  state: 'open' | 'closed';
 }
 
 interface FakeRepo {
@@ -61,6 +76,11 @@ interface FakeRepo {
   defaultBranch: string;
   branches: Map<string, string>;
   prs: FakePr[];
+  issues: FakeIssue[];
+  /** Actions secrets: only ciphertext and timestamps are kept, like GitHub. */
+  secrets: Map<string, { createdAt: string; updatedAt: string; sealed: string; keyId: string }>;
+  variables: Map<string, { value: string; createdAt: string; updatedAt: string }>;
+  keys: { keyId: string; publicKey: Uint8Array; secretKey: Uint8Array };
   comments: Array<IssueComment & { issue: number }>;
 }
 
@@ -74,6 +94,11 @@ export const WRITE_OPS = [
   'removeLabel',
   'createTree',
   'createCommit',
+  'createIssue',
+  'updateIssue',
+  'putActionsSecret',
+  'createActionsVariable',
+  'updateActionsVariable',
   'addAssignees',
   'requestReviewers',
   'createComment',
@@ -116,6 +141,7 @@ export class FakeGitHub implements GitHubPort {
       branches: new Map([['main', root.sha]]),
       prs: [],
       comments: [],
+      ...this.freshActionsState(),
     });
     return this;
   }
@@ -132,6 +158,7 @@ export class FakeGitHub implements GitHubPort {
       branches: new Map(p.branches),
       prs: [],
       comments: [],
+      ...this.freshActionsState(),
     });
     return this;
   }
@@ -290,6 +317,7 @@ export class FakeGitHub implements GitHubPort {
   async setBranchSha(repo: RepoRef, branch: string, sha: string, force: boolean): Promise<void> {
     const r = this.repo(repo);
     this.record('setBranchSha', r, { branch, sha, force });
+    this.maybeFail('setBranchSha');
     if (!this.visible(r, sha)) throw new CommitNotReachableError(fullName(repo), sha);
     const current = r.branches.get(branch);
     if (current && !force && !this.ancestors(sha).has(current)) throw new Error('fake: non-fast-forward without force');
@@ -380,6 +408,7 @@ export class FakeGitHub implements GitHubPort {
       assignees: new Set(),
       reviewers: new Set(),
       draft: input.draft,
+      createdAt: this.now(),
     };
     r.prs.push(pr);
     return { pr: this.view(r, pr), created: true };
@@ -440,12 +469,14 @@ export class FakeGitHub implements GitHubPort {
 
   async createTree(repo: RepoRef, baseTreeSha: string, changes: TreeChange[]): Promise<string> {
     const r = this.repo(repo);
+    this.maybeFail('createTree');
     this.record('createTree', r, { baseTreeSha, changes: changes.map((c) => [c.path, c.sha === null ? 'delete' : 'set']) });
     const base = this.trees.get(baseTreeSha);
     if (!base) throw new Error(`fake: unknown base tree ${baseTreeSha}`);
     const files = { ...base };
     for (const c of changes) {
-      if (c.sha === null) delete files[c.path];
+      if (c.content !== undefined) files[c.path] = c.content;
+      else if (c.sha === null) delete files[c.path];
       else {
         const content = this.blobs.get(c.sha);
         if (content === undefined) throw new Error(`fake: unknown blob ${c.sha}`);
@@ -459,7 +490,8 @@ export class FakeGitHub implements GitHubPort {
   async createCommit(repo: RepoRef, commit: NewCommit): Promise<string> {
     const r = this.repo(repo);
     this.record('createCommit', r, { parents: commit.parents });
-    const sha = this.sha1(`commit:${JSON.stringify([commit.treeSha, commit.parents, commit.message, commit.identity])}`);
+    this.maybeFail('createCommit');
+    const sha = this.sha1(`commit:${JSON.stringify([commit.treeSha, commit.parents, commit.message, commit.identity ?? null])}`);
     if (!this.commits.has(sha)) {
       const files = this.trees.get(commit.treeSha);
       if (!files) throw new Error(`fake: unknown tree ${commit.treeSha}`);
@@ -469,9 +501,9 @@ export class FakeGitHub implements GitHubPort {
         parents: commit.parents,
         files,
         treeSha: commit.treeSha,
-        date: commit.identity.date,
+        date: commit.identity?.date ?? new Date(Date.UTC(2026, 0, 1) + this.seq * 1000).toISOString(),
         message: commit.message,
-        author: commit.identity.name,
+        author: commit.identity?.name ?? 'github-app',
         network: r.network,
       });
     }
@@ -496,6 +528,142 @@ export class FakeGitHub implements GitHubPort {
     const r = this.repo(repo);
     this.record('removeLabel', r, { number, label });
     r.prs.find((p) => p.number === number)?.labels.delete(label);
+  }
+
+  async getActionsPublicKey(repo: RepoRef): Promise<ActionsPublicKey> {
+    const r = this.repo(repo);
+    this.record('getActionsPublicKey', r);
+    this.maybeFail('getActionsPublicKey');
+    return { keyId: r.keys.keyId, key: Buffer.from(r.keys.publicKey).toString('base64') };
+  }
+
+  async putActionsSecret(repo: RepoRef, name: string, encryptedValue: string, keyId: string): Promise<'created' | 'updated'> {
+    const r = this.repo(repo);
+    // Deliberately NOT recording the value: only that a write happened (like a log line would).
+    this.record('putActionsSecret', r, { name, keyId });
+    this.maybeFail('putActionsSecret');
+    if (keyId !== r.keys.keyId) throw Object.assign(new Error('key_id does not match'), { status: 422 });
+    const now = this.now();
+    const existing = r.secrets.get(name);
+    r.secrets.set(name, { createdAt: existing?.createdAt ?? now, updatedAt: now, sealed: encryptedValue, keyId });
+    return existing ? 'updated' : 'created';
+  }
+
+  async listActionsSecrets(repo: RepoRef): Promise<ActionsSecretInfo[]> {
+    const r = this.repo(repo);
+    this.record('listActionsSecrets', r);
+    this.maybeFail('listActionsSecrets');
+    return [...r.secrets].map(([name, s]) => ({ name, createdAt: s.createdAt, updatedAt: s.updatedAt }));
+  }
+
+  async listActionsVariables(repo: RepoRef): Promise<ActionsVariable[]> {
+    const r = this.repo(repo);
+    this.record('listActionsVariables', r);
+    this.maybeFail('listActionsVariables');
+    return [...r.variables].map(([name, v]) => ({ name, ...v }));
+  }
+
+  async createActionsVariable(repo: RepoRef, name: string, value: string): Promise<void> {
+    const r = this.repo(repo);
+    this.record('createActionsVariable', r, { name });
+    this.maybeFail('createActionsVariable');
+    const now = this.now();
+    r.variables.set(name, { value, createdAt: now, updatedAt: now });
+  }
+
+  async updateActionsVariable(repo: RepoRef, name: string, value: string): Promise<void> {
+    const r = this.repo(repo);
+    this.record('updateActionsVariable', r, { name });
+    this.maybeFail('updateActionsVariable');
+    const existing = r.variables.get(name);
+    r.variables.set(name, { value, createdAt: existing?.createdAt ?? this.now(), updatedAt: this.now() });
+  }
+
+  async findOpenIssueByLabelMarker(repo: RepoRef, label: string, marker: string): Promise<IssueRef | null> {
+    const r = this.repo(repo);
+    this.record('findOpenIssueByLabelMarker', r, { label });
+    const i = r.issues.find((i) => i.state === 'open' && i.labels.has(label) && i.body.includes(marker));
+    return i ? { number: i.number, htmlUrl: `https://github.com/${r.key}/issues/${i.number}`, body: i.body } : null;
+  }
+
+  async createIssue(repo: RepoRef, issue: NewIssue): Promise<IssueRef> {
+    const r = this.repo(repo);
+    this.record('createIssue', r, { title: issue.title });
+    this.maybeFail('createIssue');
+    const created: FakeIssue = { number: this.nextPr++, title: issue.title, body: issue.body, labels: new Set(issue.labels), state: 'open' };
+    r.issues.push(created);
+    return { number: created.number, htmlUrl: `https://github.com/${r.key}/issues/${created.number}`, body: created.body };
+  }
+
+  async updateIssue(repo: RepoRef, number: number, patch: { title?: string; body?: string; state?: 'closed' }): Promise<void> {
+    const r = this.repo(repo);
+    this.record('updateIssue', r, { number, ...patch });
+    this.maybeFail('updateIssue');
+    const i = r.issues.find((i) => i.number === number);
+    if (!i) throw new Error('fake: no such issue');
+    if (patch.title !== undefined) i.title = patch.title;
+    if (patch.body !== undefined) i.body = patch.body;
+    if (patch.state) i.state = patch.state;
+  }
+
+  issues(repo: string): FakeIssue[] {
+    return this.repoByKey(repo).issues;
+  }
+
+  /** Forget all issues in a repo (test scaffolding: start a scenario without the history of setting it up). */
+  clearIssues(repo: string): void {
+    this.repoByKey(repo).issues.length = 0;
+  }
+
+  /** Make a PR look old (for stale-PR checks). */
+  setPrCreatedAt(repo: string, number: number, iso: string): void {
+    const pr = this.repoByKey(repo).prs.find((p) => p.number === number);
+    if (pr) pr.createdAt = iso;
+  }
+
+  // ---- Actions test scaffolding -------------------------------------------------------------
+
+  /** Settable clock for secret/variable timestamps (ISO strings). */
+  nowIso: () => string = (() => {
+    let t = Date.UTC(2026, 9, 1);
+    return () => new Date((t += 60_000)).toISOString();
+  })();
+
+  private now(): string {
+    return this.nowIso();
+  }
+
+  /** The repo's Actions key pair, so tests can open what the app sealed (with an independent oracle). */
+  actionsKeys(repo: string): { publicKey: Uint8Array; secretKey: Uint8Array } {
+    const k = this.repoByKey(repo).keys;
+    return { publicKey: k.publicKey, secretKey: k.secretKey };
+  }
+
+  sealedSecret(repo: string, name: string): string | undefined {
+    return this.repoByKey(repo).secrets.get(name)?.sealed;
+  }
+
+  secretNames(repo: string): string[] {
+    return [...this.repoByKey(repo).secrets.keys()].sort();
+  }
+
+  setSecretUpdatedAt(repo: string, name: string, iso: string): void {
+    const s = this.repoByKey(repo).secrets.get(name);
+    if (s) s.updatedAt = iso;
+  }
+
+  variablesOf(repo: string): Record<string, string> {
+    return Object.fromEntries([...this.repoByKey(repo).variables].map(([n, v]) => [n, v.value]));
+  }
+
+  private freshActionsState() {
+    const kp = nacl.box.keyPair();
+    return {
+      issues: [] as FakeIssue[],
+      secrets: new Map(),
+      variables: new Map(),
+      keys: { keyId: `key-${++this.seq}`, publicKey: kp.publicKey, secretKey: kp.secretKey },
+    };
   }
 
   // ---- internals ------------------------------------------------------------------------------
@@ -598,6 +766,7 @@ export class FakeGitHub implements GitHubPort {
       title: p.title,
       body: p.body,
       labels: [...p.labels],
+      createdAt: p.createdAt,
       headRef: p.headRef,
       headSha: p.frozenHeadSha ?? r.branches.get(p.headRef) ?? '',
       baseRef: p.baseRef,

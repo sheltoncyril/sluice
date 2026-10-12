@@ -1,6 +1,11 @@
 import type { Client } from './client';
 import { CommitNotReachableError, NoCommitsBetweenError, TreeTooLargeError } from './errors';
 import type {
+  ActionsPublicKey,
+  IssueRef,
+  NewIssue,
+  ActionsSecretInfo,
+  ActionsVariable,
   CommitInfo,
   CompareResult,
   GitHubPort,
@@ -56,6 +61,7 @@ type PullListItem = {
   head: { ref: string; sha: string };
   base: { ref: string };
   html_url: string;
+  created_at: string;
 };
 
 function toPullRequest(p: PullListItem): PullRequest {
@@ -66,6 +72,7 @@ function toPullRequest(p: PullListItem): PullRequest {
     title: p.title,
     body: p.body ?? '',
     labels: (p.labels ?? []).map((l) => l.name),
+    createdAt: p.created_at,
     headRef: p.head.ref,
     headSha: p.head.sha,
     baseRef: p.base.ref,
@@ -348,13 +355,12 @@ export class OctokitPort implements GitHubPort {
       owner: repo.owner,
       repo: repo.repo,
       base_tree: baseTreeSha,
-      tree: changes.map((c) => ({
-        path: c.path,
-        mode: c.mode as '100644',
-        type: c.type,
-        // `sha: null` removes the path from the base tree.
-        sha: c.sha as string,
-      })),
+      tree: changes.map((c) =>
+        c.content !== undefined
+          ? { path: c.path, mode: c.mode as '100644', type: c.type, content: c.content }
+          : // `sha: null` removes the path from the base tree.
+            { path: c.path, mode: c.mode as '100644', type: c.type, sha: c.sha as string },
+      ),
     });
     return res.data.sha;
   }
@@ -366,8 +372,7 @@ export class OctokitPort implements GitHubPort {
       message: commit.message,
       tree: commit.treeSha,
       parents: commit.parents,
-      author: commit.identity,
-      committer: commit.identity,
+      ...(commit.identity ? { author: commit.identity, committer: commit.identity } : {}),
     });
     return res.data.sha;
   }
@@ -392,6 +397,103 @@ export class OctokitPort implements GitHubPort {
     } catch (e) {
       if (!isStatus(e, 404)) throw e; // already gone
     }
+  }
+
+  // ---- Actions secrets and variables ----------------------------------------------------------
+
+  async getActionsPublicKey(repo: RepoRef): Promise<ActionsPublicKey> {
+    const res = await this.client.request('GET /repos/{owner}/{repo}/actions/secrets/public-key', {
+      owner: repo.owner,
+      repo: repo.repo,
+    });
+    return { keyId: res.data.key_id, key: res.data.key };
+  }
+
+  async putActionsSecret(repo: RepoRef, name: string, encryptedValue: string, keyId: string): Promise<'created' | 'updated'> {
+    const res = await this.client.request('PUT /repos/{owner}/{repo}/actions/secrets/{secret_name}', {
+      owner: repo.owner,
+      repo: repo.repo,
+      secret_name: name,
+      encrypted_value: encryptedValue,
+      key_id: keyId,
+    });
+    return (res.status as number) === 201 ? 'created' : 'updated';
+  }
+
+  async listActionsSecrets(repo: RepoRef): Promise<ActionsSecretInfo[]> {
+    const rows = await this.client.paginate('GET /repos/{owner}/{repo}/actions/secrets', {
+      owner: repo.owner,
+      repo: repo.repo,
+      per_page: 100,
+    });
+    return rows.map((r) => ({ name: r.name, createdAt: r.created_at, updatedAt: r.updated_at }));
+  }
+
+  async listActionsVariables(repo: RepoRef): Promise<ActionsVariable[]> {
+    const rows = await this.client.paginate('GET /repos/{owner}/{repo}/actions/variables', {
+      owner: repo.owner,
+      repo: repo.repo,
+      per_page: 30, // GitHub's maximum for this endpoint
+    });
+    return rows.map((r) => ({ name: r.name, value: r.value, createdAt: r.created_at, updatedAt: r.updated_at }));
+  }
+
+  async createActionsVariable(repo: RepoRef, name: string, value: string): Promise<void> {
+    try {
+      await this.client.request('POST /repos/{owner}/{repo}/actions/variables', { owner: repo.owner, repo: repo.repo, name, value });
+    } catch (e) {
+      // Lost a race with another writer: it exists now, so make it say what we want.
+      if (isStatus(e, 409) || (isStatus(e, 422) && mentions(e, /already exists/i))) return this.updateActionsVariable(repo, name, value);
+      throw e;
+    }
+  }
+
+  async updateActionsVariable(repo: RepoRef, name: string, value: string): Promise<void> {
+    await this.client.request('PATCH /repos/{owner}/{repo}/actions/variables/{name}', {
+      owner: repo.owner,
+      repo: repo.repo,
+      name,
+      value,
+    });
+  }
+
+  // ---- issues (drift report) ----------------------------------------------------------------
+
+  async findOpenIssueByLabelMarker(repo: RepoRef, label: string, marker: string): Promise<IssueRef | null> {
+    const iterator = this.client.paginate.iterator('GET /repos/{owner}/{repo}/issues', {
+      owner: repo.owner,
+      repo: repo.repo,
+      state: 'open',
+      labels: label,
+      per_page: 30,
+    });
+    for await (const page of iterator) {
+      // The issues endpoint also lists pull requests; skip those.
+      const hit = page.data.find((i) => !i.pull_request && typeof i.body === 'string' && i.body.includes(marker));
+      if (hit) return { number: hit.number, htmlUrl: hit.html_url, body: hit.body ?? '' };
+    }
+    return null;
+  }
+
+  async createIssue(repo: RepoRef, issue: NewIssue): Promise<IssueRef> {
+    const res = await this.client.request('POST /repos/{owner}/{repo}/issues', {
+      owner: repo.owner,
+      repo: repo.repo,
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels,
+    });
+    return { number: res.data.number, htmlUrl: res.data.html_url, body: res.data.body ?? issue.body };
+  }
+
+  async updateIssue(repo: RepoRef, issueNumber: number, patch: { title?: string; body?: string; state?: 'closed' }): Promise<void> {
+    await this.client.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', {
+      owner: repo.owner,
+      repo: repo.repo,
+      issue_number: issueNumber,
+      ...patch,
+      ...(patch.state === 'closed' ? { state_reason: 'completed' as const } : {}),
+    });
   }
 
   async addLabels(repo: RepoRef, issueNumber: number, labels: string[]): Promise<void> {
