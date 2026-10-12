@@ -99,6 +99,26 @@ export function errorFields(err: unknown): Record<string, unknown> {
   return { message: scrubString(String(err)) };
 }
 
+/**
+ * The text recorded for a failure. Falls back to the error type and HTTP status when the error carries no
+ * message (seen live), and explains Cloudflare's own subrequest-limit error, which reads like a bug in
+ * sluice but is the plan: a Worker invocation may make 50 subrequests on the Free plan (10,000 on Paid),
+ * and one push webhook runs variables, workflows and the sync hop inside a single invocation.
+ */
+export function describeError(e: unknown): string {
+  const text = e instanceof Error ? e.message : String(e);
+  if (/too many subrequests/i.test(text)) {
+    return (
+      'Cloudflare stopped this Worker invocation: it hit the per-invocation subrequest limit (50 on the Free plan, ' +
+      '10,000 on Workers Paid). sluice needs the Paid plan for anything beyond a trivial chain.'
+    );
+  }
+  if (text.trim() !== '') return scrubString(text);
+  const name = e instanceof Error ? e.name : typeof e;
+  const status = (e as { status?: unknown } | null)?.status;
+  return `${name}${typeof status === 'number' ? ` (HTTP ${status})` : ''} with no message`;
+}
+
 export interface LoggerOptions {
   level?: LogLevel;
   sink?: LogSink;

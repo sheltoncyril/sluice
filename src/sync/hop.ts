@@ -4,7 +4,7 @@ import { guardBotBranches, isBotBranch } from '../github/guard';
 import type { CompareResult, GitHubPort, PullRequest, RepoRef } from '../github/port';
 import { fullName } from '../github/port';
 import { RateLimitExceededError } from '../github/resilient';
-import { errorFields, scrubString } from '../log';
+import { describeError, errorFields } from '../log';
 import type { Logger } from '../log';
 import type { Store } from '../store/types';
 import { awaitMergeable, reconcileConflict } from './conflict';
@@ -124,18 +124,6 @@ const short = (sha: string) => sha.slice(0, 7);
 const normalise = (s: string) => s.replace(/\r\n/g, '\n').trim();
 
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-/**
- * The message recorded for a failed run. A transport error can carry no message at all (seen live: a run
- * logged as `error` with nothing else), which leaves nothing to act on, so fall back to what is known.
- */
-export function describeError(e: unknown): string {
-  const text = e instanceof Error ? e.message : String(e);
-  if (text.trim() !== '') return scrubString(text);
-  const name = e instanceof Error ? e.name : typeof e;
-  const status = (e as { status?: unknown } | null)?.status;
-  return `${name}${typeof status === 'number' ? ` (HTTP ${status})` : ''} with no message`;
-}
 
 /**
  * A push webhook reaches us faster than GitHub makes the new objects readable through a fork: measured on

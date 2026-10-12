@@ -3,7 +3,7 @@ import type { VariableChange } from '../secrets/variables';
 import { fullName } from '../github/port';
 import type { ActionsSecretInfo } from '../github/port';
 import { RateLimitExceededError } from '../github/resilient';
-import { errorFields, scrubString } from '../log';
+import { describeError, errorFields, scrubString } from '../log';
 import type { Logger } from '../log';
 import { buildHopSpec, syncChainHop } from '../sync/chain';
 import type { ChainDeps, ChainHandle } from '../sync/chain';
@@ -76,7 +76,7 @@ export async function reconcileChain(
         return false;
       }
       logger.error('reconcile stage failed', { stage: name, ...errorFields(e) });
-      finding({ kind: 'hop_error', repo: chain, subject: name, detail: scrubString(e instanceof Error ? e.message : String(e)).slice(0, 200) });
+      finding({ kind: 'hop_error', repo: chain, subject: name, detail: describeError(e).slice(0, 200) });
       return true;
     }
   };

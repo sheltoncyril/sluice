@@ -1,7 +1,7 @@
 import { RateLimitExceededError } from '../github/resilient';
 import { fullName } from '../github/port';
 import type { Logger } from '../log';
-import { errorFields, scrubString } from '../log';
+import { describeError, errorFields } from '../log';
 import type { ChainDeps, ChainHandle } from '../sync/chain';
 import { resolveTarget } from '../sync/targets';
 import type { Role } from '../sync/targets';
@@ -75,7 +75,7 @@ export async function applyVariables(
     } catch (e) {
       if (e instanceof RateLimitExceededError) rateLimited = true;
       logger.warn('could not apply variables', { repo: repoName, ...errorFields(e) });
-      const message = scrubString(e instanceof Error ? e.message : 'unknown error').slice(0, 300);
+      const message = describeError(e).slice(0, 300);
       for (const v of wanted.filter((v) => !changes.some((c) => c.repo === repoName && c.name === v.name))) {
         changes.push({ target: role, repo: repoName, name: v.name, action: 'error', error: message });
       }

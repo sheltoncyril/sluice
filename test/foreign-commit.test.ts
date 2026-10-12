@@ -163,3 +163,20 @@ describe('the app bot identity', () => {
     });
   });
 });
+
+describe('describeError', () => {
+  it("explains Cloudflare's subrequest limit instead of repeating its runtime message", async () => {
+    const { describeError } = await import('../src/log');
+    const msg = describeError(new Error('Too many subrequests by single Worker invocation. To configure this limit, refer to https://...'));
+    expect(msg).toMatch(/subrequest limit/);
+    expect(msg).toMatch(/Paid/);
+    expect(msg).not.toMatch(/To configure this limit/);
+  });
+
+  it('is the one place that scrubs and names empty errors', async () => {
+    const { describeError } = await import('../src/log');
+    expect(describeError(Object.assign(new Error(''), { status: 503 }))).toBe('Error (HTTP 503) with no message');
+    expect(describeError(new Error('bad ghp_abcdefghijklmnopqrstuvwxyz0123456789'))).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(describeError('plain string failure')).toBe('plain string failure');
+  });
+});

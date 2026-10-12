@@ -593,7 +593,10 @@ Behaviour that is easy to trip over, each seen on the live chain:
   the response, so retry budgets are kept inside that.
 - **Scale.** The hourly scan reads `.github/chain.yml` in every repo of every allowlisted installation:
   one request each, sequentially. Hundreds of repos is fine on the Workers Paid plan (10,000 subrequests
-  per invocation; the Free plan's 50 is not enough), at a few percent of an installation's hourly rate
+  per invocation; the Free plan's 50 is not enough: seen live, a single push that changed `chain.yml`
+  ran variables, workflows and the sync hop in one invocation and the hop died with Cloudflare's "Too
+  many subrequests by single Worker invocation"; the run log now says what that means), at a few percent
+  of an installation's hourly rate
   limit. If the rate limit is hit part-way, the chains already found are still used. Set `CHAIN_REPOS`
   to the known midstreams to skip the scan entirely, which is the right setting for a large org.
 
