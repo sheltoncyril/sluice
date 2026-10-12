@@ -1,7 +1,7 @@
 import type { GitHubPort, RepoRef } from '../github/port';
 import { fullName, sameRepo } from '../github/port';
-import { parseChainConfig } from './parse';
-import type { ConfigIssue } from './parse';
+import { parseChainConfig, readReportingPreference } from './parse';
+import type { ConfigIssue, ReportingPreference } from './parse';
 import { CONFIG_PATH } from './schema';
 import type { ChainConfig } from './schema';
 import { parseRepo } from '../github/port';
@@ -10,7 +10,14 @@ export type LoadResult =
   | { status: 'ok'; config: ChainConfig; warnings: ConfigIssue[]; sha: string }
   /** The repo has no .github/chain.yml: it is simply not a midstream. Not an error. */
   | { status: 'missing' }
-  | { status: 'invalid'; errors: ConfigIssue[]; warnings: ConfigIssue[]; sha: string };
+  | {
+      status: 'invalid';
+      errors: ConfigIssue[];
+      warnings: ConfigIssue[];
+      sha: string;
+      /** What can still be trusted of the file's reporting settings (see readReportingPreference). */
+      reporting: ReportingPreference;
+    };
 
 /**
  * Parse + validate config text for the repo it was found in. chain.yml belongs to the MIDSTREAM
@@ -28,7 +35,8 @@ export function checkConfigText(text: string, holder: RepoRef): ReturnType<typeo
         {
           severity: 'error',
           path: 'midstream.repo',
-          message: `is "${parsed.config.midstream.repo}" but this file lives in ${fullName(holder)}; chain.yml must be in the midstream repo`,
+          // The configured value is not echoed: it passed the repo-name pattern, but it is still user-typed text.
+          message: `does not name this repository (the file lives in ${fullName(holder)}); chain.yml must be in the midstream repo`,
         },
       ],
     };
@@ -43,5 +51,11 @@ export async function loadChainConfig(port: GitHubPort, holder: RepoRef, ref?: s
   const checked = checkConfigText(file.text, holder);
   return checked.ok
     ? { status: 'ok', config: checked.config, warnings: checked.warnings, sha: file.sha }
-    : { status: 'invalid', errors: checked.errors, warnings: checked.warnings, sha: file.sha };
+    : {
+        status: 'invalid',
+        errors: checked.errors,
+        warnings: checked.warnings,
+        sha: file.sha,
+        reporting: readReportingPreference(file.text),
+      };
 }
