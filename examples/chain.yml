@@ -25,7 +25,8 @@ hops:
     merge_method: merge
     poll_interval_minutes: 60 # can only slow the hourly cron down, never speed it up
     sync_branch: chain/sync-upstream
-    # Midstream-only patches that upstream changes must not overwrite (picomatch globs).
+    # Midstream-only files that upstream changes must not overwrite (picomatch globs; dot-files match).
+    # Even when upstream edits the same file, midstream's version wins and there is no conflict.
     protected_paths:
       - "patches/**"
       - "MIDSTREAM.md"

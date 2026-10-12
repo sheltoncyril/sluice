@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ResilientOctokit } from '../src/github/client';
-import { CommitNotReachableError, NoCommitsBetweenError } from '../src/github/errors';
+import { CommitNotReachableError, NoCommitsBetweenError, TreeTooLargeError } from '../src/github/errors';
 import { OctokitPort } from '../src/github/octokit-port';
 
 const repo = { owner: 'me', repo: 'widget' };
@@ -263,5 +263,100 @@ describe('OctokitPort: files and comments', () => {
     ]);
     expect(await t.port.findCommentByMarker(repo, 7, '<!-- marker -->')).toEqual({ id: 2, body: 'x <!-- marker --> y' });
     expect(pages).toBe(2);
+  });
+});
+
+describe('OctokitPort: git data (protected paths)', () => {
+  it('getCommitInfo returns the tree and committer date; unknown commits are "not reachable"', async () => {
+    const t = port([
+      ['GET', /git\/commits\/abc$/, { status: 200, body: { tree: { sha: 'tree1' }, committer: { date: '2026-01-02T03:04:05Z' } } }],
+      ['GET', /git\/commits\/nope$/, { status: 404, body: { message: 'Not Found' } }],
+    ]);
+    expect(await t.port.getCommitInfo(repo, 'abc')).toEqual({ treeSha: 'tree1', committerDate: '2026-01-02T03:04:05Z' });
+    await expect(t.port.getCommitInfo(repo, 'nope')).rejects.toBeInstanceOf(CommitNotReachableError);
+  });
+
+  it('getTreeEntries lists recursively, keeps files and submodules, drops directories', async () => {
+    const t = port([
+      [
+        'GET',
+        /git\/trees\/t1$/,
+        {
+          status: 200,
+          body: {
+            truncated: false,
+            tree: [
+              { path: 'src', mode: '040000', type: 'tree', sha: 'd1' },
+              { path: 'src/a.ts', mode: '100644', type: 'blob', sha: 'b1' },
+              { path: 'vendor/lib', mode: '160000', type: 'commit', sha: 'c1' },
+            ],
+          },
+        },
+      ],
+    ]);
+    expect(await t.port.getTreeEntries(repo, 't1')).toEqual([
+      { path: 'src/a.ts', mode: '100644', type: 'blob', sha: 'b1' },
+      { path: 'vendor/lib', mode: '160000', type: 'commit', sha: 'c1' },
+    ]);
+    expect(t.seen[0]!.query.get('recursive')).toBe('1');
+  });
+
+  it('getTreeEntries refuses a truncated listing rather than guessing', async () => {
+    const t = port([['GET', /git\/trees\/big$/, { status: 200, body: { truncated: true, tree: [] } }]]);
+    await expect(t.port.getTreeEntries(repo, 'big')).rejects.toBeInstanceOf(TreeTooLargeError);
+  });
+
+  it('createTree sends base_tree, and null shas to delete paths', async () => {
+    const t = port([['POST', /git\/trees$/, { status: 201, body: { sha: 'newtree' } }]]);
+    const sha = await t.port.createTree(repo, 'base1', [
+      { path: 'patches/x', mode: '100644', type: 'blob', sha: 'blob1' },
+      { path: 'patches/new', mode: '100644', type: 'blob', sha: null },
+    ]);
+    expect(sha).toBe('newtree');
+    expect(t.seen[0]!.body).toEqual({
+      base_tree: 'base1',
+      tree: [
+        { path: 'patches/x', mode: '100644', type: 'blob', sha: 'blob1' },
+        { path: 'patches/new', mode: '100644', type: 'blob', sha: null },
+      ],
+    });
+  });
+
+  it('createCommit uses ONE identity for author and committer (so the hash is deterministic)', async () => {
+    const t = port([['POST', /git\/commits$/, { status: 201, body: { sha: 'newcommit' } }]]);
+    const identity = { name: 'sluice', email: 'sluice@users.noreply.github.com', date: '2026-01-02T03:04:05Z' };
+    expect(await t.port.createCommit(repo, { message: 'm', treeSha: 'tree1', parents: ['p1'], identity })).toBe('newcommit');
+    expect(t.seen[0]!.body).toEqual({ message: 'm', tree: 'tree1', parents: ['p1'], author: identity, committer: identity });
+  });
+});
+
+describe('OctokitPort: mergeability and labels', () => {
+  it('getMergeability passes GitHub\'s three answers through: true, false, and "not computed yet"', async () => {
+    const answers = [
+      { mergeable: true, mergeable_state: 'clean' },
+      { mergeable: false, mergeable_state: 'dirty' },
+      { mergeable: null, mergeable_state: 'unknown' },
+    ];
+    let i = 0;
+    const t = port([['GET', /pulls\/7$/, () => ({ status: 200, body: answers[i++] })]]);
+    expect(await t.port.getMergeability(repo, 7)).toEqual({ mergeable: true, state: 'clean' });
+    expect(await t.port.getMergeability(repo, 7)).toEqual({ mergeable: false, state: 'dirty' });
+    expect(await t.port.getMergeability(repo, 7)).toEqual({ mergeable: null, state: 'unknown' });
+  });
+
+  it('removeLabel encodes names with slashes, and treats an already-missing label as done', async () => {
+    const t = port([
+      ['DELETE', /issues\/7\/labels\/sluice\/conflict$/, { status: 200, body: [] }],
+      ['DELETE', /issues\/7\/labels\/gone$/, { status: 404, body: { message: 'Label does not exist' } }],
+      ['DELETE', /issues\/7\/labels\/locked$/, { status: 403, body: { message: 'Resource not accessible by integration' } }],
+    ]);
+    await t.port.removeLabel(repo, 7, 'sluice/conflict');
+    await t.port.removeLabel(repo, 7, 'gone');
+    await expect(t.port.removeLabel(repo, 7, 'locked')).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('pull request views carry their label names', async () => {
+    const t = port([['GET', /\/pulls$/, { status: 200, body: [pr({ labels: [{ name: 'sluice' }, { name: 'sluice/conflict' }] })] }]]);
+    expect((await t.port.findOpenPullRequest(repo, 'chain/sync-upstream', 'main'))?.labels).toEqual(['sluice', 'sluice/conflict']);
   });
 });

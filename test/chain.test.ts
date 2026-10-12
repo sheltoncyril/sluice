@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { createEventHandler } from '../src/events';
 import { RateLimitExceededError } from '../src/github/resilient';
 import { nullLogger } from '../src/log';
+import { buildHopSpec } from '../src/sync/chain';
+import { loadChainConfig } from '../src/config/load';
 import { runAdminSync } from '../src/sync/admin';
 import { syncDownstreamOnPush } from '../src/sync/downstream';
 import { pollUpstreams } from '../src/sync/poll';
@@ -328,5 +330,68 @@ describe('admin sync', () => {
     const out = await run(s);
     expect(out).toMatchObject({ ok: false, status: 422 });
     if (!out.ok) expect(out.details).toMatch(/variabless/);
+  });
+});
+
+describe('step 4 through the chain: conflicts and protected paths', () => {
+  const holder = { owner: 'me', repo: 'widget' };
+
+  async function specFor(extra: string, hop: 'upstream_to_midstream' | 'midstream_to_downstream' = 'upstream_to_midstream') {
+    const s = chainScene({ configYaml: chainYml({ extra }) });
+    const loaded = await loadChainConfig(s.gh, holder);
+    if (loaded.status !== 'ok') throw new Error('config should load');
+    return buildHopSpec({ holder, config: loaded.config, midstreamPort: s.gh }, hop);
+  }
+
+  it('conflict assignees: conflicts.assignees, else pull_requests.reviewers, else pull_requests.assignees', async () => {
+    const explicit = await specFor('conflicts:\n  assignees: [alice]\n');
+    expect(explicit.conflicts.assignees).toEqual(['alice']);
+    expect(explicit.conflicts).toMatchObject({ label: 'sluice/conflict', comment: true, requestReview: true });
+
+    expect((await specFor('')).conflicts.assignees).toEqual(['octocat']); // pull_requests.reviewers
+
+    const onlyAssignees = chainScene({
+      configYaml: chainYml().replace('  reviewers: [octocat]\n', ''),
+    });
+    const loaded = await loadChainConfig(onlyAssignees.gh, holder);
+    if (loaded.status !== 'ok') throw new Error('config should load');
+    const spec = buildHopSpec({ holder, config: loaded.config, midstreamPort: onlyAssignees.gh }, 'upstream_to_midstream');
+    expect(spec.conflicts.assignees).toEqual(['octocat']); // fell through to pull_requests.assignees
+  });
+
+  it('protected paths are per hop', async () => {
+    const extra = 'hops:\n  upstream_to_midstream:\n    protected_paths: ["patches/**"]\n  midstream_to_downstream:\n    protected_paths: ["deploy/**"]\n';
+    expect((await specFor(extra, 'upstream_to_midstream')).protectedPaths).toEqual(['patches/**']);
+    expect((await specFor(extra, 'midstream_to_downstream')).protectedPaths).toEqual(['deploy/**']);
+  });
+
+  it('cron: an upstream/midstream conflict is flagged in midstream, and downstream is untouched', async () => {
+    const s = chainScene();
+    s.gh.commit(MID, 'main', { 'a.txt': 'midstream version\n' }, 'midstream edit');
+    s.gh.commit('acme/widget', 'main', { 'a.txt': 'upstream version\n' }, 'upstream edit');
+    const [r] = await poll(s);
+    expect(r).toMatchObject({ outcome: 'conflict', conflicted: true });
+    const [prMid] = s.gh.prs(MID);
+    expect([...prMid!.labels]).toContain('sluice/conflict');
+    expect([...prMid!.assignees]).toEqual(expect.arrayContaining(['octocat']));
+    expect(s.gh.prs(DOWN)).toHaveLength(0);
+  });
+
+  it('downstream keeps its own files: a push to midstream cannot overwrite a protected downstream path (cross-org)', async () => {
+    const s = chainScene({
+      configYaml: chainYml({ extra: 'hops:\n  midstream_to_downstream:\n    protected_paths: ["deploy/**"]\n' }),
+    });
+    s.gh.commit(DOWN, 'main', { 'deploy/prod.env': 'REGION=eu-west-1 (downstream only)\n' }, 'downstream: deployment config');
+    s.gh.commit(MID, 'main', { 'deploy/prod.env': 'REGION=us-east-1 (midstream default)\n', 'a.txt': 'new\n' }, 'midstream: change');
+
+    const r = await push(s);
+    expect(r).toMatchObject({ outcome: 'pr_opened', conflicted: false, protectedKept: ['deploy/prod.env'] });
+    expect(s.gh.filesAt(DOWN, 'chain/sync-midstream')).toMatchObject({
+      'deploy/prod.env': 'REGION=eu-west-1 (downstream only)\n',
+      'a.txt': 'new\n',
+    });
+    expect(new Set(s.gh.writes().map((w) => w.repo))).toEqual(new Set([DOWN])); // restore commit made IN downstream
+    s.gh.mergePr(DOWN, r!.prNumber!, 'merge');
+    expect((await push(s, { deliveryId: 'again' }))?.outcome).toBe('up_to_date');
   });
 });

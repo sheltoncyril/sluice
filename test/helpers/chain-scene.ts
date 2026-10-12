@@ -81,7 +81,7 @@ export function chainScene(
     gh,
     store,
     clock,
-    deps: { ports, store, now: clock.now, allowedOwners: new Set(opts.allowed ?? ['me', 'other']) },
+    deps: { ports, store, now: clock.now, allowedOwners: new Set(opts.allowed ?? ['me', 'other']), sleep: async () => {} },
     discovery,
     forInstallationCalls,
     forRepoCalls,

@@ -12,11 +12,14 @@ export interface SyncPrInput {
   mergeMethod: MergeMethod;
   /** Commits the PR brings in (relative to what the target already has / last synced). */
   compare: CompareResult;
-  /** GitHub could not merge cleanly; the branch holds the raw source tip and the PR shows conflicts. */
+  /** GitHub reports the PR cannot be merged cleanly. */
   conflicted: boolean;
+  /** Protected paths whose target content was kept in place of the source's (sorted). */
+  protectedPaths?: readonly string[];
 }
 
 const MAX_COMMITS_LISTED = 20;
+const MAX_PATHS_LISTED = 15;
 const MAX_BODY = 60_000; // GitHub's limit is 65,536
 
 export function renderSyncPrTitle(input: Pick<SyncPrInput, 'source' | 'target'>): string {
@@ -59,9 +62,21 @@ export function renderSyncPrBody(input: SyncPrInput): string {
   if (input.conflicted) {
     lines.push(
       '',
-      `> ⚠️ **Merge conflicts.** GitHub could not merge \`${src}\` into \`${target.branch}\` automatically, so \`${input.syncBranch}\` ` +
-        `holds the source tip as-is and this PR shows the conflicts. Resolve them by pushing to \`${input.syncBranch}\`.`,
+      `> ⚠️ **Merge conflicts.** \`${input.syncBranch}\` cannot be merged into \`${target.branch}\` automatically. ` +
+        `Resolve them by pushing to \`${input.syncBranch}\`; sluice never overwrites commits you push there.`,
     );
+  }
+
+  const kept = input.protectedPaths ?? [];
+  if (kept.length > 0) {
+    lines.push(
+      '',
+      '### Protected paths',
+      `${kept.length} path${kept.length === 1 ? '' : 's'} listed under \`protected_paths\` keep their \`${target.branch}\` content; ` +
+        `upstream changes to ${kept.length === 1 ? 'it' : 'them'} are not applied:`,
+    );
+    for (const path of kept.slice(0, MAX_PATHS_LISTED)) lines.push(`- \`${path}\``);
+    if (kept.length > MAX_PATHS_LISTED) lines.push(`- … and ${kept.length - MAX_PATHS_LISTED} more`);
   }
 
   if (compare.commits.length > 0) {

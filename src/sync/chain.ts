@@ -14,6 +14,8 @@ export interface ChainDeps {
   store: Store;
   now: () => Date;
   allowedOwners: ReadonlySet<string>;
+  /** Injectable for tests; defaults to a real timer. Used while waiting for GitHub to compute mergeability. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** A chain whose config has been loaded, plus the port for the midstream installation. */
@@ -33,6 +35,18 @@ export function buildHopSpec(handle: ChainHandle, hop: HopId): HopSpec {
     teamReviewers: config.pull_requests.team_reviewers,
     draft: config.pull_requests.draft,
   };
+  // Who gets pinged on a conflict: the conflict-specific list, else the PR reviewers, else the assignees.
+  const conflictWho = config.conflicts.assignees.length > 0
+    ? config.conflicts.assignees
+    : config.pull_requests.reviewers.length > 0
+      ? config.pull_requests.reviewers
+      : config.pull_requests.assignees;
+  const conflicts = {
+    label: config.conflicts.label,
+    comment: config.conflicts.comment,
+    assignees: conflictWho,
+    requestReview: config.conflicts.request_review,
+  };
   const chain = fullName(holder);
   if (hop === 'upstream_to_midstream') {
     const h = config.hops.upstream_to_midstream;
@@ -45,6 +59,7 @@ export function buildHopSpec(handle: ChainHandle, hop: HopId): HopSpec {
       mergeMethod: h.merge_method,
       protectedPaths: h.protected_paths,
       pr,
+      conflicts,
     };
   }
   const h = config.hops.midstream_to_downstream;
@@ -57,6 +72,7 @@ export function buildHopSpec(handle: ChainHandle, hop: HopId): HopSpec {
     mergeMethod: h.merge_method,
     protectedPaths: h.protected_paths,
     pr,
+    conflicts,
   };
 }
 
@@ -118,7 +134,14 @@ export async function syncChainHop(
 
   return syncHop(
     spec,
-    { sourcePort: handle.midstreamPort, targetPort, store: deps.store, logger, now: deps.now },
+    {
+      sourcePort: handle.midstreamPort,
+      targetPort,
+      store: deps.store,
+      logger,
+      now: deps.now,
+      ...(deps.sleep ? { sleep: deps.sleep } : {}),
+    },
     { trigger: opts.trigger, ...(opts.deliveryId ? { deliveryId: opts.deliveryId } : {}), ...(opts.dryRun ? { dryRun: true } : {}) },
   );
 }

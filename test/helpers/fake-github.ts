@@ -1,13 +1,19 @@
-import { CommitNotReachableError, NoCommitsBetweenError } from '../../src/github/errors';
+import { createHash } from 'node:crypto';
+import { CommitNotReachableError, NoCommitsBetweenError, TreeTooLargeError } from '../../src/github/errors';
 import type {
+  CommitInfo,
   CompareResult,
   GitHubPort,
   IssueComment,
   MergeIntoResult,
+  NewCommit,
   NewPullRequest,
+  PullMergeability,
   PullRequest,
   RepoFile,
   RepoRef,
+  TreeChange,
+  TreeEntry,
 } from '../../src/github/port';
 import { fullName } from '../../src/github/port';
 
@@ -26,6 +32,8 @@ interface Commit {
   seq: number;
   parents: string[];
   files: Record<string, string>;
+  treeSha: string;
+  date: string;
   message: string;
   author: string;
   network: string;
@@ -63,6 +71,9 @@ export const WRITE_OPS = [
   'createPullRequest',
   'updatePullRequest',
   'addLabels',
+  'removeLabel',
+  'createTree',
+  'createCommit',
   'addAssignees',
   'requestReviewers',
   'createComment',
@@ -83,6 +94,13 @@ export class FakeGitHub implements GitHubPort {
   private nextComment = 1;
   calls: CallRecord[] = [];
   private failures = new Map<string, Error[]>();
+  private trees = new Map<string, Record<string, string>>();
+  private blobs = new Map<string, string>();
+  private mergeableCalls = new Map<string, number>();
+  /** GitHub computes mergeability lazily: answer `null` this many times per PR before the real answer. */
+  mergeableLag = 0;
+  /** Simulate GitHub truncating a recursive tree listing. */
+  treesTruncated = false;
 
   // ---- test scaffolding -------------------------------------------------------------------
 
@@ -401,6 +419,85 @@ export class FakeGitHub implements GitHubPort {
     reviewers.forEach((l) => r.prs.find((p) => p.number === number)?.reviewers.add(l));
   }
 
+  async getCommitInfo(repo: RepoRef, sha: string): Promise<CommitInfo> {
+    const r = this.repo(repo);
+    this.record('getCommitInfo', r, { sha });
+    if (!this.visible(r, sha)) throw new CommitNotReachableError(fullName(repo), sha);
+    const c = this.commitOf(sha);
+    return { treeSha: c.treeSha, committerDate: c.date };
+  }
+
+  async getTreeEntries(repo: RepoRef, treeSha: string): Promise<TreeEntry[]> {
+    const r = this.repo(repo);
+    this.record('getTreeEntries', r, { treeSha });
+    if (this.treesTruncated) throw new TreeTooLargeError(fullName(repo));
+    const files = this.trees.get(treeSha);
+    if (!files) throw new Error(`fake: unknown tree ${treeSha}`);
+    return Object.keys(files)
+      .sort()
+      .map((path) => ({ path, mode: '100644', type: 'blob' as const, sha: this.blobSha(files[path]!) }));
+  }
+
+  async createTree(repo: RepoRef, baseTreeSha: string, changes: TreeChange[]): Promise<string> {
+    const r = this.repo(repo);
+    this.record('createTree', r, { baseTreeSha, changes: changes.map((c) => [c.path, c.sha === null ? 'delete' : 'set']) });
+    const base = this.trees.get(baseTreeSha);
+    if (!base) throw new Error(`fake: unknown base tree ${baseTreeSha}`);
+    const files = { ...base };
+    for (const c of changes) {
+      if (c.sha === null) delete files[c.path];
+      else {
+        const content = this.blobs.get(c.sha);
+        if (content === undefined) throw new Error(`fake: unknown blob ${c.sha}`);
+        files[c.path] = content;
+      }
+    }
+    return this.registerTree(files);
+  }
+
+  /** Content-addressed, like git: identical inputs return the identical commit. */
+  async createCommit(repo: RepoRef, commit: NewCommit): Promise<string> {
+    const r = this.repo(repo);
+    this.record('createCommit', r, { parents: commit.parents });
+    const sha = this.sha1(`commit:${JSON.stringify([commit.treeSha, commit.parents, commit.message, commit.identity])}`);
+    if (!this.commits.has(sha)) {
+      const files = this.trees.get(commit.treeSha);
+      if (!files) throw new Error(`fake: unknown tree ${commit.treeSha}`);
+      this.commits.set(sha, {
+        sha,
+        seq: ++this.seq,
+        parents: commit.parents,
+        files,
+        treeSha: commit.treeSha,
+        date: commit.identity.date,
+        message: commit.message,
+        author: commit.identity.name,
+        network: r.network,
+      });
+    }
+    return sha;
+  }
+
+  async getMergeability(repo: RepoRef, number: number): Promise<PullMergeability> {
+    const r = this.repo(repo);
+    this.record('getMergeability', r, { number });
+    this.maybeFail('getMergeability');
+    const key = `${r.key}#${number}`;
+    const seen = (this.mergeableCalls.get(key) ?? 0) + 1;
+    this.mergeableCalls.set(key, seen);
+    if (seen <= this.mergeableLag) return { mergeable: null, state: 'unknown' };
+    const pr = r.prs.find((p) => p.number === number);
+    if (!pr) throw new Error('fake: no such PR');
+    const ok = this.threeWay(r.branches.get(pr.baseRef)!, r.branches.get(pr.headRef)!) !== null;
+    return { mergeable: ok, state: ok ? 'clean' : 'dirty' };
+  }
+
+  async removeLabel(repo: RepoRef, number: number, label: string): Promise<void> {
+    const r = this.repo(repo);
+    this.record('removeLabel', r, { number, label });
+    r.prs.find((p) => p.number === number)?.labels.delete(label);
+  }
+
   // ---- internals ------------------------------------------------------------------------------
 
   private repoByKey(name: string): FakeRepo {
@@ -419,10 +516,30 @@ export class FakeGitHub implements GitHubPort {
     return c;
   }
 
+  private sha1(text: string): string {
+    return createHash('sha1').update(text).digest('hex');
+  }
+
+  private registerTree(files: Record<string, string>): string {
+    const entries = Object.keys(files)
+      .sort()
+      .map((p) => [p, this.blobSha(files[p]!)]);
+    const sha = this.sha1(`tree:${JSON.stringify(entries)}`);
+    this.trees.set(sha, { ...files });
+    return sha;
+  }
+
+  private blobSha(content: string): string {
+    const sha = this.sha1(`blob:${content}`);
+    this.blobs.set(sha, content);
+    return sha;
+  }
+
   private makeCommit(parents: string[], files: Record<string, string>, message: string, author: string, network: string): Commit {
     const seq = ++this.seq;
     const sha = seq.toString(16).padStart(40, '0');
-    const c: Commit = { sha, seq, parents, files, message, author, network };
+    const date = new Date(Date.UTC(2026, 0, 1) + seq * 1000).toISOString();
+    const c: Commit = { sha, seq, parents, files, treeSha: this.registerTree(files), date, message, author, network };
     this.commits.set(sha, c);
     return c;
   }
@@ -480,6 +597,7 @@ export class FakeGitHub implements GitHubPort {
       merged: p.merged,
       title: p.title,
       body: p.body,
+      labels: [...p.labels],
       headRef: p.headRef,
       headSha: p.frozenHeadSha ?? r.branches.get(p.headRef) ?? '',
       baseRef: p.baseRef,

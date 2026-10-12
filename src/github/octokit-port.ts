@@ -1,14 +1,19 @@
 import type { Client } from './client';
-import { CommitNotReachableError, NoCommitsBetweenError } from './errors';
+import { CommitNotReachableError, NoCommitsBetweenError, TreeTooLargeError } from './errors';
 import type {
+  CommitInfo,
   CompareResult,
   GitHubPort,
   IssueComment,
   MergeIntoResult,
+  NewCommit,
   NewPullRequest,
+  PullMergeability,
   PullRequest,
   RepoFile,
   RepoRef,
+  TreeChange,
+  TreeEntry,
 } from './port';
 import { fullName } from './port';
 
@@ -47,6 +52,7 @@ type PullListItem = {
   merged_at: string | null;
   title: string;
   body: string | null;
+  labels?: Array<{ name: string }>;
   head: { ref: string; sha: string };
   base: { ref: string };
   html_url: string;
@@ -59,6 +65,7 @@ function toPullRequest(p: PullListItem): PullRequest {
     merged: p.merged_at !== null,
     title: p.title,
     body: p.body ?? '',
+    labels: (p.labels ?? []).map((l) => l.name),
     headRef: p.head.ref,
     headSha: p.head.sha,
     baseRef: p.base.ref,
@@ -301,6 +308,90 @@ export class OctokitPort implements GitHubPort {
       pull_number: pullNumber,
       ...patch,
     });
+  }
+
+  // ---- git data -----------------------------------------------------------------------------
+
+  async getCommitInfo(repo: RepoRef, sha: string): Promise<CommitInfo> {
+    try {
+      const res = await this.client.request('GET /repos/{owner}/{repo}/git/commits/{commit_sha}', {
+        owner: repo.owner,
+        repo: repo.repo,
+        commit_sha: sha,
+      });
+      return { treeSha: res.data.tree.sha, committerDate: res.data.committer.date };
+    } catch (e) {
+      if (isStatus(e, 404) || isStatus(e, 422)) throw new CommitNotReachableError(fullName(repo), sha);
+      throw e;
+    }
+  }
+
+  async getTreeEntries(repo: RepoRef, treeSha: string): Promise<TreeEntry[]> {
+    const res = await this.client.request('GET /repos/{owner}/{repo}/git/trees/{tree_sha}', {
+      owner: repo.owner,
+      repo: repo.repo,
+      tree_sha: treeSha,
+      recursive: '1',
+    });
+    if (res.data.truncated) throw new TreeTooLargeError(fullName(repo));
+    const entries: TreeEntry[] = [];
+    for (const e of res.data.tree) {
+      if ((e.type === 'blob' || e.type === 'commit') && e.path && e.mode && e.sha) {
+        entries.push({ path: e.path, mode: e.mode, type: e.type, sha: e.sha });
+      }
+    }
+    return entries;
+  }
+
+  async createTree(repo: RepoRef, baseTreeSha: string, changes: TreeChange[]): Promise<string> {
+    const res = await this.client.request('POST /repos/{owner}/{repo}/git/trees', {
+      owner: repo.owner,
+      repo: repo.repo,
+      base_tree: baseTreeSha,
+      tree: changes.map((c) => ({
+        path: c.path,
+        mode: c.mode as '100644',
+        type: c.type,
+        // `sha: null` removes the path from the base tree.
+        sha: c.sha as string,
+      })),
+    });
+    return res.data.sha;
+  }
+
+  async createCommit(repo: RepoRef, commit: NewCommit): Promise<string> {
+    const res = await this.client.request('POST /repos/{owner}/{repo}/git/commits', {
+      owner: repo.owner,
+      repo: repo.repo,
+      message: commit.message,
+      tree: commit.treeSha,
+      parents: commit.parents,
+      author: commit.identity,
+      committer: commit.identity,
+    });
+    return res.data.sha;
+  }
+
+  async getMergeability(repo: RepoRef, pullNumber: number): Promise<PullMergeability> {
+    const res = await this.client.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+      owner: repo.owner,
+      repo: repo.repo,
+      pull_number: pullNumber,
+    });
+    return { mergeable: res.data.mergeable ?? null, state: res.data.mergeable_state ?? 'unknown' };
+  }
+
+  async removeLabel(repo: RepoRef, issueNumber: number, label: string): Promise<void> {
+    try {
+      await this.client.request('DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}', {
+        owner: repo.owner,
+        repo: repo.repo,
+        issue_number: issueNumber,
+        name: label,
+      });
+    } catch (e) {
+      if (!isStatus(e, 404)) throw e; // already gone
+    }
   }
 
   async addLabels(repo: RepoRef, issueNumber: number, labels: string[]): Promise<void> {

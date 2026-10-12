@@ -26,13 +26,13 @@ This repo is being built in reviewable steps.
 |---|------|-------|
 | 1 | Scaffold: Worker, Hono, webhook verification, App JWT + installation tokens | ✅ built |
 | 2 | `chain.yml` parsing and validation | ✅ built |
-| 3 | Hop sync (cron upstream→midstream, webhook midstream→downstream) | ✅ built, **awaiting your review** |
-| 4 | Conflict handling (label / comment / assign) and protected paths | ⏳ not built |
+| 3 | Hop sync (cron upstream→midstream, webhook midstream→downstream) | ✅ built, merged |
+| 4 | Conflict handling (label / comment / assign) and protected paths | ✅ built, **awaiting your review** |
 | 5 | Secret / variable pass-through distribution | ⏳ not built |
 | 6 | Workflow template PRs | ⏳ not built |
 | 7 | Drift reconcile | ⏳ not built |
 
-Everything below is accurate for steps 1–3. Sections marked *(planned)* describe design intent only.
+Everything below is accurate for steps 1–4. Sections marked *(planned)* describe design intent only.
 
 ---
 
@@ -196,6 +196,61 @@ point straight at a source commit. If it is not, the hop fails with an error tha
 `transport: git-data` (copy objects through the Git Data API for unrelated repos) is accepted by
 the schema but **not implemented**; hops report that clearly instead of attempting it.
 
+### Conflicts
+
+After opening or refreshing a sync PR, sluice asks GitHub whether it can be merged. GitHub computes
+that lazily (the first answer is often "not yet"), so it polls up to 5 times with growing waits
+(1.5 s, 3 s, 4.5 s, 6 s). GitHub's answer is authoritative; a refused merge only counts as evidence
+if GitHub never answers, and an unanswered poll never *clears* an existing flag.
+
+On the **transition** into a conflict, once:
+
+1. add the conflict label (`conflicts.label`, default `sluice/conflict`);
+2. post **one** comment, marked so it is edited in place and never duplicated (`conflicts.comment`);
+3. assign (and, with `conflicts.request_review`, request review from) `conflicts.assignees`, else
+   `pull_requests.reviewers`, else `pull_requests.assignees`.
+
+When the conflict goes away the label comes off and the comment is edited to say so. The label *is*
+the "already flagged" state, so a steady state (still conflicting, or still clean) performs **zero
+writes**. Consequences worth knowing:
+
+- if you remove the label by hand while the conflict persists, the next run flags it again (without a
+  second comment);
+- you resolve a conflict by pushing to the `chain/sync-*` branch; sluice never force-pushes over it;
+- a failure to comment, assign or request review is logged and does not fail the sync; the label is
+  applied first for that reason.
+
+### Protected paths
+
+`hops.<hop>.protected_paths` (globs, `dot: true`, so `config/**` covers `config/.env`) are files whose
+content in the **target** must survive the sync: midstream-only patches on the upstream hop,
+downstream-only deployment config on the downstream hop.
+
+The reason to protect a path is that *both sides* edited it, which is exactly when GitHub refuses to
+merge. So sluice does not "merge, then fix up". It builds a **restore commit** instead: the source
+tree with every protected path reset to the target's content (removed if the target has no such
+file), parented on the source tip. That commit is what gets merged, so:
+
+- protected paths cannot conflict, and upstream edits to them are discarded;
+- everything else in the PR is the normal sync;
+- the source tip is still an ancestor, so "up to date" detection converges once the PR lands.
+
+The commit is deterministic (fixed identity `sluice <sluice@users.noreply.github.com>` and the
+source commit's date), so re-runs and overlapping runs produce the same object. A run that changes
+nothing creates **no** objects. The PR body lists the protected paths that were kept. `dry_run`
+reports them as `plan.protectedPaths`.
+
+Limits, stated plainly:
+
+- **Config changes apply on the next upstream commit.** Adding a path to `protected_paths` does not
+  rewrite an already-open sync PR whose source has not moved; close it, or wait for upstream to move.
+- Detection reads both full file trees (recursive listing): about 4 extra API reads per hop run.
+  GitHub truncates listings beyond ~100k entries; sluice then **refuses** to sync rather than guess.
+- Restore commits are created through the API with that fixed identity and are **not signed**. If you
+  require signed commits on `chain/*` branches, this will not pass; the merge commit you create when
+  landing the PR is yours and signed as usual.
+- Protection is path-level: it discards upstream's version of the *whole file*, not individual hunks.
+
 ### Operating it
 
 All `/admin/*` routes need `Authorization: Bearer $ADMIN_TOKEN`.
@@ -254,7 +309,7 @@ persisted by this code, but it is not protected from a compromised Worker deploy
 ## 8. Development
 
 ```bash
-npm test               # vitest: ~190 tests, no network, no Cloudflare account
+npm test               # vitest: ~250 tests, no network, no Cloudflare account
 npm run typecheck
 npx wrangler dev       # local workerd; put dev secrets in .dev.vars (git-ignored)
 ```
@@ -272,4 +327,8 @@ and one real sync on a throwaway chain before relying on them:
 
 - creating a ref in a fork that points at a commit that only exists in the parent repo;
 - `compare` and the Merges API accepting such a SHA;
-- cross-org forks sharing objects as assumed.
+- cross-org forks sharing objects as assumed;
+- *(step 4)* the Merges API accepting the **unreferenced restore commit** as `head` (it is created
+  through the Git Data API and only becomes reachable once merged into the sync branch), and the Git
+  Data endpoints (`git/commits`, `git/trees`) resolving a parent-repo SHA through the fork;
+- *(step 4)* `mergeable` becoming non-null within the polling budget (if not, the next run asks again).

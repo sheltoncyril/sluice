@@ -7,8 +7,11 @@ import { RateLimitExceededError } from '../github/resilient';
 import { errorFields, scrubString } from '../log';
 import type { Logger } from '../log';
 import type { Store } from '../store/types';
+import { awaitMergeable, reconcileConflict } from './conflict';
+import type { ConflictPolicy, MergeabilityPolling } from './conflict';
 import { parseMarker } from './marker';
 import { renderSyncPrBody, renderSyncPrTitle } from './pr-body';
+import { createRestoreCommit, planProtection } from './protect';
 
 /**
  * One hop of the chain: make sure the TARGET repo has an up-to-date sync PR carrying the SOURCE
@@ -32,7 +35,7 @@ export interface HopSpec {
   /** Bot-owned branch in the target repo (always under chain/). */
   syncBranch: string;
   mergeMethod: MergeMethod;
-  /** Used by step 4 (protected paths); carried through so the spec is complete. */
+  /** Globs whose target content must survive the sync (see protect.ts). */
   protectedPaths: readonly string[];
   pr: {
     labels: readonly string[];
@@ -41,6 +44,8 @@ export interface HopSpec {
     teamReviewers: readonly string[];
     draft: boolean;
   };
+  /** What to do when GitHub says the sync PR cannot be merged cleanly. */
+  conflicts: ConflictPolicy;
 }
 
 export interface HopDeps {
@@ -51,6 +56,10 @@ export interface HopDeps {
   store: Store;
   logger: Logger;
   now: () => Date;
+  /** Injectable for tests; defaults to a real timer. */
+  sleep?: (ms: number) => Promise<void>;
+  /** How hard to poll GitHub's lazily computed `mergeable`. */
+  polling?: MergeabilityPolling;
 }
 
 export interface HopOptions {
@@ -83,6 +92,8 @@ export interface HopPlan {
   /** Target commits the source does not have. */
   behindBy: number;
   existingPr?: number;
+  /** Protected paths whose target content would be kept in place of the source's. */
+  protectedPaths?: string[];
 }
 
 export interface HopResult {
@@ -93,8 +104,12 @@ export interface HopResult {
   targetSha?: string;
   prNumber?: number;
   prUrl?: string;
-  /** GitHub could not auto-merge; the PR shows the conflict (step 4 labels/assigns). */
+  /** GitHub says the PR cannot be merged cleanly (labelled, commented and assigned per `conflicts`). */
   conflicted?: boolean;
+  /** GitHub's answer when last polled: true/false, or null if it was still computing. */
+  mergeable?: boolean | null;
+  /** Protected paths whose target content was kept. */
+  protectedKept?: string[];
   plan?: HopPlan;
   message?: string;
 }
@@ -189,6 +204,12 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   // A PR for exactly this source commit was closed without merging: respect that until the source moves.
   const wasRejected = !!latestClosed && !latestClosed.merged && parseMarker(latestClosed.body)?.source === sourceSha;
 
+  // Protected paths the source would overwrite (read-only; objects are only created if we really sync).
+  const protection =
+    pending && !wasRejected && spec.protectedPaths.length > 0
+      ? await planProtection(out, target.repo, sourceSha, targetSha, spec.protectedPaths)
+      : null;
+
   const plan: HopPlan = {
     action: !pending ? (open ? 'close_stale_pr' : 'none') : wasRejected ? 'skip_rejected' : open ? 'update_pr' : 'open_pr',
     pending,
@@ -196,6 +217,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
     aheadBy: ancestry.aheadBy,
     behindBy: ancestry.behindBy,
     ...(open ? { existingPr: open.number } : {}),
+    ...(protection ? { protectedPaths: protection.paths } : {}),
   };
   const context = { ...base, sourceSha, targetSha };
   logger.debug('hop analysed', { ...plan, source: short(sourceSha), target: short(targetSha) });
@@ -231,9 +253,16 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   }
 
   // ---- Make the sync branch carry the source ----------------------------------------------
-  // Target has no commits of its own -> the branch can be the source commit itself (fast-forward).
-  // Otherwise start from the target tip and let GitHub merge the source in.
-  const startSha = ancestry.behindBy === 0 ? sourceSha : targetSha;
+  // What we bring in is the source commit itself, or its "restore" twin when protected paths differ
+  // (created lazily, so a run that changes nothing creates no objects).
+  let restored: string | undefined;
+  const effective = async (): Promise<string> =>
+    protection ? (restored ??= await createRestoreCommit(out, target.repo, protection, sourceSha, target.branch)) : sourceSha;
+
+  // Target has no commits of its own -> the branch can simply BE that commit (fast-forward).
+  // Otherwise start from the target tip and let GitHub merge it in.
+  const fastForward = ancestry.behindBy === 0;
+  const startSha = async (): Promise<string> => (fastForward ? effective() : targetSha);
 
   let branchSha = await out.getBranchSha(target.repo, spec.syncBranch);
   let freshBranch = false;
@@ -246,8 +275,8 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
     const exactlyMerged = latest?.merged === true && latest.headSha === branchSha;
     const addsNothing = !exactlyMerged && (await out.compare(target.repo, target.branch, spec.syncBranch)).aheadBy === 0;
     if (exactlyMerged || addsNothing) {
-      await out.setBranchSha(target.repo, spec.syncBranch, startSha, true);
-      branchSha = startSha;
+      branchSha = await startSha();
+      await out.setBranchSha(target.repo, spec.syncBranch, branchSha, true);
       freshBranch = true;
       branchChanged = true;
       logger.info('reset leftover sync branch', { branch: spec.syncBranch });
@@ -255,102 +284,142 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   }
 
   if (!branchSha) {
-    const created = await out.createBranch(target.repo, spec.syncBranch, startSha);
+    const start = await startSha();
+    const created = await out.createBranch(target.repo, spec.syncBranch, start);
     if (created === 'created') {
-      branchSha = startSha;
+      branchSha = start;
       freshBranch = true;
       branchChanged = true;
-      logger.info('created sync branch', { branch: spec.syncBranch, at: short(startSha) });
+      logger.info('created sync branch', { branch: spec.syncBranch, at: short(start) });
     } else {
       branchSha = await out.getBranchSha(target.repo, spec.syncBranch); // lost a race; carry on with theirs
     }
   }
 
-  let conflicted = false;
-  if (branchSha !== sourceSha) {
-    const alreadyHas = freshBranch ? false : (await out.compare(target.repo, spec.syncBranch, sourceSha)).aheadBy === 0;
-    if (!alreadyHas) {
-      const merged = await out.mergeIntoBranch(
-        target.repo,
-        spec.syncBranch,
-        sourceSha,
-        `sluice: merge ${fullName(source.repo)}@${source.branch} (${short(sourceSha)}) into ${spec.syncBranch}`,
-      );
-      if (merged.result === 'merged') branchChanged = true;
-      if (merged.result === 'conflict') {
-        conflicted = true;
-        // A branch we just made has no human work on it: point it at the source tip so the PR
-        // exists and displays the conflict. A pre-existing branch is left exactly as it is.
-        if (freshBranch) {
-          await out.setBranchSha(target.repo, spec.syncBranch, sourceSha, true);
-          branchChanged = true;
-        }
-        logger.warn('merge conflict while syncing', { branch: spec.syncBranch, source: short(sourceSha) });
-      }
-    }
-  } else if (ancestry.behindBy > 0) {
-    // The branch IS the raw source tip although the target has commits of its own. Either an earlier
-    // merge conflicted and we fell back to this, or the target diverged after a fast-forward branch.
-    // Re-try the merge from the other side: deterministic, so a persisting conflict is reported the
-    // same way every run (no flapping PR text), and it heals as soon as the conflict goes away.
+  // A fresh fast-forward branch already is the commit. Any other branch needs the merge unless it
+  // already contains the source (then re-running is a no-op).
+  const needsMerge = freshBranch
+    ? !fastForward
+    : branchSha !== sourceSha && (await out.compare(target.repo, spec.syncBranch, sourceSha)).aheadBy > 0;
+
+  let structuralConflict = false; // GitHub refused the merge just now (evidence, before it has polled)
+  if (needsMerge) {
+    const head = await effective();
     const merged = await out.mergeIntoBranch(
       target.repo,
       spec.syncBranch,
-      targetSha,
-      `sluice: merge ${target.branch} (${short(targetSha)}) into ${spec.syncBranch}`,
+      head,
+      `sluice: merge ${fullName(source.repo)}@${source.branch} (${short(sourceSha)}) into ${spec.syncBranch}`,
     );
     if (merged.result === 'merged') branchChanged = true;
-    if (merged.result === 'conflict') conflicted = true;
+    if (merged.result === 'conflict') {
+      structuralConflict = true;
+      // A branch we just made has no human work on it: point it at the commit so the PR exists and
+      // displays the conflict. A pre-existing branch is left exactly as it is.
+      if (freshBranch) {
+        await out.setBranchSha(target.repo, spec.syncBranch, head, true);
+        branchChanged = true;
+      }
+      logger.warn('merge conflict while syncing', { branch: spec.syncBranch, source: short(sourceSha) });
+    }
   }
 
   // ---- Open or refresh the PR ---------------------------------------------------------------
   const title = renderSyncPrTitle(spec);
-  const body = renderSyncPrBody({
-    hop: spec.id,
-    source,
-    target,
-    syncBranch: spec.syncBranch,
-    sourceSha,
-    mergeMethod: spec.mergeMethod,
-    compare: described,
-    conflicted,
-  });
+  const hadConflictLabel = open?.labels.includes(spec.conflicts.label) ?? false;
+  const render = (conflicted: boolean) =>
+    renderSyncPrBody({
+      hop: spec.id,
+      source,
+      target,
+      syncBranch: spec.syncBranch,
+      sourceSha,
+      mergeMethod: spec.mergeMethod,
+      compare: described,
+      conflicted,
+      ...(protection ? { protectedPaths: protection.paths } : {}),
+    });
+
+  // The body shows the last known conflict state; it is corrected below once GitHub has answered.
+  let renderedConflict = structuralConflict || hadConflictLabel;
+  let body = render(renderedConflict);
+  let pr: { number: number; htmlUrl: string; labels: string[] };
+  let created = false;
+  let edited = false;
 
   if (open) {
-    const changed = normalise(open.body) !== normalise(body) || open.title !== title;
-    if (changed) await out.updatePullRequest(target.repo, open.number, { title, body });
-    const outcome: HopOutcome = conflicted ? 'conflict' : branchChanged || changed ? 'pr_updated' : 'pr_unchanged';
-    if (outcome !== 'pr_unchanged') logger.info('sync PR refreshed', { pr: open.number, outcome });
-    return { ...context, outcome, prNumber: open.number, prUrl: open.htmlUrl, conflicted, plan };
+    if (normalise(open.body) !== normalise(body) || open.title !== title) {
+      await out.updatePullRequest(target.repo, open.number, { title, body });
+      edited = true;
+    }
+    pr = open;
+  } else {
+    try {
+      const res = await out.createPullRequest(target.repo, {
+        title,
+        body,
+        head: spec.syncBranch,
+        base: target.branch,
+        draft: spec.pr.draft,
+      });
+      pr = res.pr;
+      created = res.created;
+      if (created) {
+        await decorate(out, target.repo, pr.number, spec, logger);
+        logger.info('opened sync PR', { pr: pr.number });
+      }
+    } catch (e) {
+      if (e instanceof NoCommitsBetweenError) {
+        // Squashed content already present: the branch adds nothing, so there is nothing to review.
+        return { ...context, outcome: 'up_to_date', plan, message: 'sync branch adds nothing over the target branch' };
+      }
+      throw e;
+    }
   }
 
-  try {
-    const { pr, created } = await out.createPullRequest(target.repo, {
-      title,
-      body,
-      head: spec.syncBranch,
-      base: target.branch,
-      draft: spec.pr.draft,
-    });
-    if (created) {
-      await decorate(out, target.repo, pr.number, spec, logger);
-      logger.info('opened sync PR', { pr: pr.number });
-    }
-    return {
-      ...context,
-      outcome: conflicted ? 'conflict' : created ? 'pr_opened' : 'pr_unchanged',
-      prNumber: pr.number,
-      prUrl: pr.htmlUrl,
-      conflicted,
-      plan,
-    };
-  } catch (e) {
-    if (e instanceof NoCommitsBetweenError) {
-      // Squashed content already present: the branch adds nothing, so there is nothing to review.
-      return { ...context, outcome: 'up_to_date', plan, message: 'sync branch adds nothing over the target branch' };
-    }
-    throw e;
+  // ---- Conflicts: ask GitHub (it computes mergeability lazily, so poll) ----------------------
+  const mergeable = await awaitMergeable(out, target.repo, pr.number, deps.polling, deps.sleep);
+  // `null` = still computing after every attempt: fall back on what we already know.
+  const conflicted = mergeable === null ? structuralConflict || hadConflictLabel : !mergeable;
+  if (conflicted !== renderedConflict) {
+    renderedConflict = conflicted;
+    body = render(conflicted);
+    await out.updatePullRequest(target.repo, pr.number, { title, body });
+    edited = true;
   }
+  await reconcileConflict(
+    out,
+    {
+      repo: target.repo,
+      pr: { number: pr.number, labels: pr.labels },
+      policy: spec.conflicts,
+      syncBranch: spec.syncBranch,
+      targetBranch: target.branch,
+      sourceName: `\`${fullName(source.repo)}@${source.branch}\``,
+      logger,
+    },
+    conflicted,
+  );
+
+  const outcome: HopOutcome = conflicted
+    ? 'conflict'
+    : created
+      ? 'pr_opened'
+      : open && (branchChanged || edited)
+        ? 'pr_updated'
+        : 'pr_unchanged';
+  if (open && outcome !== 'pr_unchanged') logger.info('sync PR refreshed', { pr: pr.number, outcome });
+
+  return {
+    ...context,
+    outcome,
+    prNumber: pr.number,
+    prUrl: pr.htmlUrl,
+    conflicted,
+    mergeable,
+    plan,
+    ...(protection ? { protectedKept: protection.paths } : {}),
+  };
 }
 
 /** Labels / assignees / reviewers are conveniences: a bad login must not fail the sync. */

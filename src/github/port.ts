@@ -56,6 +56,8 @@ export interface PullRequest {
   merged: boolean;
   title: string;
   body: string;
+  /** Label names currently on the PR. */
+  labels: string[];
   headRef: string;
   /** Head commit when last seen (for a merged PR: the commit that was merged). */
   headSha: string;
@@ -69,6 +71,42 @@ export interface NewPullRequest {
   head: string;
   base: string;
   draft: boolean;
+}
+
+export interface CommitInfo {
+  treeSha: string;
+  /** ISO-8601 committer date of the commit. */
+  committerDate: string;
+}
+
+/** A file (or submodule) in a git tree. Directories are not listed; their files are, with full paths. */
+export interface TreeEntry {
+  path: string;
+  mode: string;
+  type: 'blob' | 'commit';
+  sha: string;
+}
+
+/** One change to apply on top of a base tree. `sha: null` deletes the path. */
+export interface TreeChange {
+  path: string;
+  mode: string;
+  type: 'blob' | 'commit';
+  sha: string | null;
+}
+
+export interface NewCommit {
+  message: string;
+  treeSha: string;
+  parents: string[];
+  /** Used for BOTH author and committer so the commit hash is fully determined by the inputs. */
+  identity: { name: string; email: string; date: string };
+}
+
+/** GitHub's lazily computed answer to "can this PR be merged?". `mergeable: null` means "not computed yet". */
+export interface PullMergeability {
+  mergeable: boolean | null;
+  state: string;
 }
 
 export type MergeIntoResult =
@@ -113,7 +151,19 @@ export interface GitHubPort {
     patch: { title?: string; body?: string; state?: 'closed' },
   ): Promise<void>;
 
+  /** Git data: enough to build a commit whose tree is another commit's tree with a few paths changed. */
+  getCommitInfo(repo: RepoRef, sha: string): Promise<CommitInfo>;
+  /** Every file in a tree, recursively. Throws {@link TreeTooLargeError} if GitHub truncates the listing. */
+  getTreeEntries(repo: RepoRef, treeSha: string): Promise<TreeEntry[]>;
+  createTree(repo: RepoRef, baseTreeSha: string, changes: TreeChange[]): Promise<string>;
+  /** Creates an (unreferenced) commit object; identical inputs yield the identical SHA. */
+  createCommit(repo: RepoRef, commit: NewCommit): Promise<string>;
+
+  getMergeability(repo: RepoRef, pullNumber: number): Promise<PullMergeability>;
+
   addLabels(repo: RepoRef, issueNumber: number, labels: string[]): Promise<void>;
+  /** Removes a label from an issue/PR; a label that is not there is not an error. */
+  removeLabel(repo: RepoRef, issueNumber: number, label: string): Promise<void>;
   addAssignees(repo: RepoRef, issueNumber: number, logins: string[]): Promise<void>;
   requestReviewers(repo: RepoRef, pullNumber: number, reviewers: string[], teamReviewers: string[]): Promise<void>;
 
