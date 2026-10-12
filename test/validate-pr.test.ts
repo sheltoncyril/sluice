@@ -152,3 +152,41 @@ describe('event routing for pull_request', () => {
     expect(h.asked).toEqual([]);
   });
 });
+
+describe('a PR that stops touching chain.yml after it was flagged', () => {
+  /** Flag a PR, then revert its chain.yml change so the PR no longer touches the file. */
+  async function flaggedThenReverted() {
+    const s = await setup(BAD);
+    expect(await run(s)).toBe('invalid');
+    s.gh.commit('me/widget', 'feature', { '.github/chain.yml': GOOD }, 'revert the config change');
+    s.gh.commit('me/widget', 'feature', { 'README.md': 'a real change' }, 'something else');
+    const reverted = { ...s, headSha: s.gh.tip('me/widget', 'feature') };
+    return reverted;
+  }
+
+  it('settles the old "invalid" comment instead of leaving it up forever', async () => {
+    const s = await flaggedThenReverted();
+    expect(await run(s)).toBe('not_affected');
+
+    expect(commentsOn(s)).toHaveLength(1); // edited in place, not stacked
+    expect(commentsOn(s)[0]).toContain(CONFIG_COMMENT_MARKER);
+    expect(commentsOn(s)[0]).toContain('no longer changed by this pull request');
+    expect(commentsOn(s)[0]).not.toContain('is invalid');
+    expect(s.store.runs.at(-1)).toMatchObject({ hop: 'config', outcome: 'config_valid', prNumber: s.pr.number });
+  });
+
+  it('does it once: the next event for that PR writes nothing', async () => {
+    const s = await flaggedThenReverted();
+    await run(s);
+    s.gh.resetCalls();
+    expect(await run(s)).toBe('not_affected');
+    expect(s.gh.writes()).toEqual([]);
+  });
+
+  it('costs an ordinary PR no comment lookup at all', async () => {
+    const s = await setup(GOOD, 'readme');
+    s.gh.resetCalls();
+    expect(await run(s)).toBe('not_affected');
+    expect(s.gh.calls.some((c) => c.op === 'findCommentByMarker')).toBe(false);
+  });
+});

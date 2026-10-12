@@ -33,7 +33,32 @@ export async function validateConfigOnPullRequest(
   const { repo, pullNumber, headSha } = input;
 
   const files = await port.listPullRequestFiles(repo, pullNumber);
-  if (!files.includes(CONFIG_PATH)) return 'not_affected';
+  if (!files.includes(CONFIG_PATH)) {
+    // The PR may have stopped touching chain.yml after we flagged it (the author reverted the change).
+    // Our "invalid" comment would then stand forever, so settle it. The run log says whether this PR was
+    // ever flagged, so an ordinary PR costs no GitHub call.
+    const last = (await store.recentRuns(fullName(repo), 50)).find((r) => r.hop === 'config' && r.prNumber === pullNumber);
+    if (last?.outcome === 'config_invalid') {
+      const stale = await port.findCommentByMarker(repo, pullNumber, CONFIG_COMMENT_MARKER);
+      if (stale) {
+        await port.updateComment(
+          repo,
+          stale.id,
+          [CONFIG_COMMENT_MARKER, `### ✅ \`${CONFIG_PATH}\` is no longer changed by this pull request`].join('\n'),
+        );
+      }
+      await store.recordRun({
+        startedAt: now().toISOString(),
+        finishedAt: now().toISOString(),
+        trigger: 'webhook:pull_request',
+        chain: fullName(repo),
+        hop: 'config',
+        outcome: 'config_valid',
+        prNumber: pullNumber,
+      });
+    }
+    return 'not_affected';
+  }
 
   // Read at the PR head SHA through the *base* repo path (works for same-repo and fork PRs).
   const file = await port.readFile(repo, CONFIG_PATH, headSha);

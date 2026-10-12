@@ -211,6 +211,15 @@ describe('an invalid chain.yml found by the scheduled scan', () => {
       expect(issues(s)).toEqual([]);
     });
 
+    it('a repository with Issues turned off (a fork, by default) says so, instead of blaming the permission', async () => {
+      const s = chainScene({ configYaml: BROKEN });
+      s.gh.failNext('createIssue', Object.assign(new Error('Issues has been disabled in this repository.'), { status: 410 }));
+      await scan(s);
+      const row = s.store.runs.at(-1)!;
+      expect(row.detail).toMatchObject({ report: 'failed', reportError: expect.stringMatching(/Issues are disabled .*fork/) });
+      expect(JSON.stringify(row.detail)).not.toMatch(/permission/);
+    });
+
     it('a refused create is the same: no crash, an outcome', async () => {
       const s = chainScene({ configYaml: BROKEN });
       s.gh.failNext('createIssue', forbidden());
@@ -240,10 +249,10 @@ describe('an invalid chain.yml found by the scheduled scan', () => {
     });
   });
 
-  it('lets a rate limit stop the scan, as it does for every other read', async () => {
+  it('lets a rate limit end the scan early, without losing the run row or crashing', async () => {
     const s = chainScene({ configYaml: BROKEN });
     s.gh.failNext('findOpenIssueByLabelMarker', new RateLimitExceededError('primary', 3_000_000));
-    await expect(scan(s)).rejects.toBeInstanceOf(RateLimitExceededError);
+    await expect(scan(s)).resolves.toEqual([]); // nothing found before the limit; chains found earlier would be kept
     expect(s.store.runs.at(-1)).toMatchObject({ outcome: 'config_invalid' }); // the row is still written
   });
 });

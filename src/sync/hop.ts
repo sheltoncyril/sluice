@@ -12,7 +12,7 @@ import type { ConflictPolicy, MergeabilityPolling } from './conflict';
 import { parseMarker } from './marker';
 import { decoratePullRequest } from './pr-meta';
 import { renderSyncPrBody, renderSyncPrTitle } from './pr-body';
-import { createRestoreCommit, planProtection } from './protect';
+import { createRestoreCommit, planProtection, RESTORE_COMMIT_IDENTITY } from './protect';
 
 /**
  * One hop of the chain: make sure the TARGET repo has an up-to-date sync PR carrying the SOURCE
@@ -139,19 +139,29 @@ export function describeError(e: unknown): string {
 
 /**
  * A push webhook reaches us faster than GitHub makes the new objects readable through a fork: measured on
- * a live chain, the commit in under a second but its tree only after ~3 s (422 until then). Retry the
- * read a few times with doubling waits (1+2+4+8 s at most) before believing "not reachable".
+ * a live chain, the commit in under a second but its tree after anywhere from ~3 s to over 15 s (422 until
+ * then). Retry the read with growing waits before believing "not reachable".
+ *
+ * The budget is 20 s because a webhook is processed inside waitUntil, which the runtime bounds (about 30 s
+ * after the response). A run that still fails is recorded as an error, and the hourly tick retries it
+ * (healFailedDownstream), so the tail of the distribution costs minutes, not a day.
  *
  * Only for reads of objects we know the source has. A genuinely unrelated repo is rejected earlier, by
  * the ancestry check, and never waits.
  */
-export async function whenVisible<T>(read: () => Promise<T>, sleep: (ms: number) => Promise<void>, attempts = 5): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
+export const VISIBILITY_WAITS_MS = [1000, 2000, 4000, 6000, 7000] as const;
+
+export async function whenVisible<T>(
+  read: () => Promise<T>,
+  sleep: (ms: number) => Promise<void>,
+  waits: readonly number[] = VISIBILITY_WAITS_MS,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
     try {
       return await read();
     } catch (e) {
-      if (!(e instanceof CommitNotReachableError) || attempt >= attempts) throw e;
-      await sleep(1000 * 2 ** (attempt - 1));
+      if (!(e instanceof CommitNotReachableError) || attempt >= waits.length) throw e;
+      await sleep(waits[attempt]!);
     }
   }
 }
@@ -233,10 +243,13 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
 
   let pending = ancestry.aheadBy > 0;
   let described = ancestry; // what the PR body lists as "commits"
+  // The source commit the last merged sync PR carried (squash/rebase only; see below).
+  let baselineSha: string | undefined;
   if (pending && spec.mergeMethod !== 'merge') {
     // Squash/rebase never make the source an ancestor of the target. Use the last merged sync PR's
     // recorded source commit as the baseline instead.
     const baseline = (await closed()).filter((p) => p.merged).map((p) => parseMarker(p.body)?.source).find(Boolean);
+    baselineSha = baseline;
     if (baseline === sourceSha) {
       pending = false;
     } else if (baseline) {
@@ -314,10 +327,40 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
         ))
       : sourceSha;
 
+  const identity = async () => (await deps.commitIdentity?.().catch(() => null)) ?? RESTORE_COMMIT_IDENTITY;
+
+  /**
+   * Where a branch that has to be MERGED into starts. Normally the target tip. After a squash or rebase
+   * merge the previous source commit is not an ancestor of the target, so GitHub's three-way merge falls
+   * back to an old merge base and conflicts on every file touched by two syncs in a row (seen live: the
+   * second consecutive edit of one file). We know that commit was applied, so say so: start from an
+   * "ours" merge, the target's own tree with that commit as a second parent. The merge base is then
+   * the baseline and only what changed since it is brought in. The commit is deterministic like the
+   * restore commit, and is squashed away with the PR.
+   */
+  const seededFromTarget = async (): Promise<string> => {
+    if (!baselineSha || baselineSha === sourceSha) return targetSha;
+    try {
+      const info = await out.getCommitInfo(target.repo, targetSha);
+      return await out.createCommit(target.repo, {
+        message: `sluice: ${short(baselineSha)} is already applied here (${spec.mergeMethod} merge)
+
+sluice-source: ${baselineSha}`,
+        treeSha: info.treeSha,
+        parents: [targetSha, baselineSha],
+        identity: { ...(await identity()), date: info.committerDate },
+      });
+    } catch (e) {
+      // History rewritten upstream, so the baseline is gone: fall back to a plain merge.
+      if (e instanceof CommitNotReachableError) return targetSha;
+      throw e;
+    }
+  };
+
   // Target has no commits of its own -> the branch can simply BE that commit (fast-forward).
-  // Otherwise start from the target tip and let GitHub merge it in.
+  // Otherwise start from the target tip (seeded as above) and let GitHub merge it in.
   const fastForward = ancestry.behindBy === 0;
-  const startSha = async (): Promise<string> => (fastForward ? effective() : targetSha);
+  const startSha = async (): Promise<string> => (fastForward ? effective() : seededFromTarget());
 
   let branchSha = await out.getBranchSha(target.repo, spec.syncBranch);
   let freshBranch = false;

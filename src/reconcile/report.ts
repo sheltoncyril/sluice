@@ -136,9 +136,11 @@ function failedOutcome(e: unknown, logger: Logger, what: string): ReportOutcome 
   return {
     status: 'failed',
     error:
-      status === 403 || status === 404
-        ? 'GitHub refused: the app needs the "Issues: Read & write" permission to keep a drift report (or set reconcile.report to "none")'
-        : scrubString(e instanceof Error ? e.message : 'unknown error').slice(0, 200),
+      status === 410
+        ? 'Issues are disabled in this repository (a fork has them off by default): enable Issues in its settings, or set reconcile.report to "none"'
+        : status === 403 || status === 404
+          ? 'GitHub refused: the app needs the "Issues: Read & write" permission to keep a drift report (or set reconcile.report to "none")'
+          : scrubString(e instanceof Error ? e.message : 'unknown error').slice(0, 200),
   };
 }
 

@@ -164,7 +164,22 @@ describe('what is still said, so the errors stay useful', () => {
     expect(e.message).toMatch(/hops\.upstream_to_midstream\.protected_paths/);
   });
 
-  it('withholds the name of a key that is neither, and points at the position instead', () => {
+  it('suggests the right word for a typo of a key that lives elsewhere, and says where it belongs', () => {
+    const e = issuesOf(`${MIN}protectd_paths: []
+`)[0]!;
+    expect(e.path).toBe('protectd_paths'); // within two edits of a schema word, so safe to show
+    expect(e.message).toContain('did you mean "protected_paths"?');
+    expect(e.message).toContain('hops.upstream_to_midstream.protected_paths');
+  });
+
+  it('does the same for a typo of a nested key at another level, without the per-hop hint', () => {
+    const e = issuesOf(`${MIN}pull_requests:
+  asignees: [a]
+`)[0]!;
+    expect(e).toMatchObject({ path: 'pull_requests.asignees', message: 'unknown key (did you mean "assignees"?)' });
+  });
+
+  it('still withholds a key that is near nothing', () => {
     const e = issuesOf(`${MIN}${CANARY}: 1\n`)[0]!;
     expect(e.path).toBe('');
     expect(e.message).toMatch(/name is not shown/);

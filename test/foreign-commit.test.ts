@@ -62,7 +62,7 @@ describe('a tree pushed to the source is not readable through the fork for a few
     expect(r.protectedKept).toEqual(['b.txt']);
   });
 
-  it('gives up after four waits (15 s in all) and says the commit is not reachable', async () => {
+  it('gives up after five waits (20 s in all) and says the commit is not reachable', async () => {
     const s = scene();
     s.gh.commit(UP, 'main', { 'a.txt': '2\n', 'b.txt': '2\n' });
     s.gh.treeLagReads = 99;
@@ -70,7 +70,7 @@ describe('a tree pushed to the source is not readable through the fork for a few
     const r = await s.run({}, protectB);
     expect(r.outcome).toBe('error');
     expect(r.message).toMatch(/not reachable/);
-    expect(s.sleeps).toEqual([1000, 2000, 4000, 8000]);
+    expect(s.sleeps).toEqual([1000, 2000, 4000, 6000, 7000]);
     expect(s.gh.writes()).toEqual([]); // nothing was half-done
   });
 

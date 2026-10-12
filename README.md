@@ -565,6 +565,38 @@ that fork (so a cross-owner network). Public repos, one chain, one day: treat it
   links to nobody; `<id>+<slug>[bot]@users.noreply.github.com` links to the app's bot (shown with
   type `Bot`).
 
+### Operating notes from the live runs
+
+Behaviour that is easy to trip over, each seen on the live chain:
+
+- **A fork has Issues turned off by default.** The midstream is a fork under this transport, so the
+  drift / invalid-config report fails with "Issues are disabled in this repository" until you enable
+  Issues in its settings (or set `reconcile.report: none`). Listing issues answers `200 []` either way;
+  only creating one answers `410`.
+- **Squash and rebase.** The source commit a squashed PR carried is not an ancestor of the target, which
+  used to make a file edited by two syncs in a row conflict. The next sync branch now starts from an
+  "ours" merge naming that commit, so the merge base moves forward. `merge_method: merge` is unaffected.
+- **Changing `protected_paths` does not clean an existing sync branch.** Earlier merges already put the
+  unprotected file into the branch's history, so a new protection cannot remove it and the PR conflicts.
+  Close that PR and delete its `chain/*` branch; the next sync starts clean.
+- **Removing a `workflows.files` entry turns that file into an ordinary synced file.** The automatic
+  protection goes with the entry, so the midstream's rendered copy then collides with the downstream's.
+  Protect the path explicitly, or delete it in the target first.
+- **"Files changed" can list a protected path as removed** (`.github/chain.yml  +0/-22`). The PR's merge
+  base is a midstream commit that still had the file, and the target has since dropped it; merging
+  changes nothing. It is how GitHub draws a three-dot diff.
+- **A failed downstream sync is retried on the hourly tick.** A push webhook can outrun GitHub making the
+  new tree readable through the fork (3 s to over 15 s observed). The webhook waits up to 20 s for it;
+  anything still failing is recorded as an error and retried at the next `:00`, not left for the daily
+  reconcile.
+- **Webhook work is bounded.** It runs inside `waitUntil`, which the runtime caps at roughly 30 s after
+  the response, so retry budgets are kept inside that.
+- **Scale.** The hourly scan reads `.github/chain.yml` in every repo of every allowlisted installation:
+  one request each, sequentially. Hundreds of repos is fine on the Workers Paid plan (10,000 subrequests
+  per invocation; the Free plan's 50 is not enough), at a few percent of an installation's hourly rate
+  limit. If the rate limit is hit part-way, the chains already found are still used. Set `CHAIN_REPOS`
+  to the known midstreams to skip the scan entirely, which is the right setting for a large org.
+
 ### Not verified against live GitHub
 
 These behaviours are asserted from GitHub's documentation and experience but have **not** been
