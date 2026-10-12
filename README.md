@@ -204,7 +204,8 @@ it is deliberately not included.
 fork in upstream's network and downstream a fork in midstream's, so a branch in the target can
 point straight at a source commit. If it is not, the hop fails with an error that says so.
 `transport: git-data` (copy objects through the Git Data API for unrelated repos) is accepted by
-the schema but **not implemented**; hops report that clearly instead of attempting it.
+the schema but **not implemented**; hops report that clearly instead of attempting it. A design
+proposal for it, awaiting review, is in [`docs/git-data-transport.md`](docs/git-data-transport.md).
 
 ### Conflicts
 
