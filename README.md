@@ -258,8 +258,9 @@ file), parented on the source tip. That commit is what gets merged, so:
 The commit is deterministic (a fixed identity and the source commit's date), so re-runs and
 overlapping runs produce the same object. The identity is the **app's own bot account**
 (`<slug>[bot]`, with GitHub's noreply address `<bot user id>+<slug>[bot]@users.noreply.github.com`),
-looked up once per isolate from `GET /app` and `GET /users/<slug>[bot]`, so GitHub shows the app's name
-and logo on it. If that lookup fails it falls back to `sluice <sluice@sluice.invalid>`: an address no
+looked up once per isolate from `GET /app` and `GET /users/<slug>[bot]` (the latter with an installation
+token: the same lookup made with the app's JWT did not yield an identity in production, and the
+fallback below was used instead), so GitHub shows the app's name and logo on it. If that lookup fails it falls back to `sluice <sluice@sluice.invalid>`: an address no
 GitHub account can own. That matters because GitHub links a commit to whichever account owns its email;
 an earlier fixed choice, `sluice@users.noreply.github.com`, belongs to a real unrelated user, whose name
 and avatar then appeared on the PR. A run that changes

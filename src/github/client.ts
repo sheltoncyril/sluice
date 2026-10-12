@@ -157,8 +157,12 @@ export class GitHubApp {
       const { data } = await this.asApp.request('GET /app');
       const slug = data?.slug;
       if (!slug) return null;
-      const login = `${slug}[bot]`;
-      const user = await this.asApp.request('GET /users/{username}', { username: login });
+      // /users/{login} is not an app endpoint, so ask with an installation token (as every other public
+      // read here does), not with the app's JWT.
+      const installation = (await this.listInstallations()).find((i) => !i.suspended);
+      if (!installation) return null;
+      const client = await this.forInstallation(installation.id);
+      const user = await client.request('GET /users/{username}', { username: `${slug}[bot]` });
       return botCommitIdentity(slug, Number(user.data.id));
     })().catch((e) => {
       this.bot = undefined;
