@@ -1,5 +1,5 @@
 import type { HopId, MergeMethod } from '../config/schema';
-import { NoCommitsBetweenError } from '../github/errors';
+import { CommitNotReachableError, NoCommitsBetweenError } from '../github/errors';
 import { guardBotBranches, isBotBranch } from '../github/guard';
 import type { CompareResult, GitHubPort, PullRequest, RepoRef } from '../github/port';
 import { fullName } from '../github/port';
@@ -118,6 +118,27 @@ export interface HopResult {
 const short = (sha: string) => sha.slice(0, 7);
 const normalise = (s: string) => s.replace(/\r\n/g, '\n').trim();
 
+const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * A push webhook reaches us faster than GitHub makes the new objects readable through a fork: measured on
+ * a live chain, the commit in under a second but its tree only after ~3 s (422 until then). Retry the
+ * read a few times with doubling waits (1+2+4+8 s at most) before believing "not reachable".
+ *
+ * Only for reads of objects we know the source has. A genuinely unrelated repo is rejected earlier, by
+ * the ancestry check, and never waits.
+ */
+export async function whenVisible<T>(read: () => Promise<T>, sleep: (ms: number) => Promise<void>, attempts = 5): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await read();
+    } catch (e) {
+      if (!(e instanceof CommitNotReachableError) || attempt >= attempts) throw e;
+      await sleep(1000 * 2 ** (attempt - 1));
+    }
+  }
+}
+
 export async function syncHop(spec: HopSpec, deps: HopDeps, opts: HopOptions): Promise<HopResult> {
   const startedAt = deps.now().toISOString();
   const logger = deps.logger.child({ chain: spec.chain, hop: spec.id });
@@ -214,7 +235,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   // Protected paths the source would overwrite (read-only; objects are only created if we really sync).
   const protection =
     pending && !wasRejected && spec.protectedPaths.length > 0
-      ? await planProtection(out, target.repo, sourceSha, targetSha, spec.protectedPaths)
+      ? await whenVisible(() => planProtection(out, target.repo, sourceSha, targetSha, spec.protectedPaths), deps.sleep ?? realSleep)
       : null;
 
   const plan: HopPlan = {

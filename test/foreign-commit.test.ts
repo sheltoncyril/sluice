@@ -48,6 +48,54 @@ describe('a commit that lives only in another repo of the fork network', () => {
   });
 });
 
+describe('a tree pushed to the source is not readable through the fork for a few seconds', () => {
+  const protectB = { protectedPaths: ['b.txt'] };
+
+  it('waits (1 s, 2 s, ...) and then syncs, instead of failing the push-triggered run', async () => {
+    const s = scene();
+    s.gh.commit(UP, 'main', { 'a.txt': '2\n', 'b.txt': '2\n' });
+    s.gh.treeLagReads = 4; // both tree reads of one attempt run in parallel, so two attempts fail
+
+    const r = await s.run({}, protectB);
+    expect(r.outcome).toBe('pr_opened');
+    expect(s.sleeps).toEqual([1000, 2000]);
+    expect(r.protectedKept).toEqual(['b.txt']);
+  });
+
+  it('gives up after four waits (15 s in all) and says the commit is not reachable', async () => {
+    const s = scene();
+    s.gh.commit(UP, 'main', { 'a.txt': '2\n', 'b.txt': '2\n' });
+    s.gh.treeLagReads = 99;
+
+    const r = await s.run({}, protectB);
+    expect(r.outcome).toBe('error');
+    expect(r.message).toMatch(/not reachable/);
+    expect(s.sleeps).toEqual([1000, 2000, 4000, 8000]);
+    expect(s.gh.writes()).toEqual([]); // nothing was half-done
+  });
+
+  it('does not wait when nothing reads the tree (no protected paths)', async () => {
+    const s = scene();
+    s.gh.commit(UP, 'main', { 'a.txt': '2\n' });
+    s.gh.treeLagReads = 99;
+
+    expect((await s.run()).outcome).toBe('pr_opened');
+    expect(s.sleeps).toEqual([]);
+  });
+
+  it('and a source that is NOT in the network fails at once, without waiting', async () => {
+    const s = scene();
+    s.gh.createRepo('stranger/widget', { 'a.txt': '1\n' });
+    const sha = s.gh.commit('stranger/widget', 'main', { 'a.txt': '2\n' });
+    s.gh.treeLagReads = 99;
+
+    const r = await s.run({}, { source: { repo: { owner: 'stranger', repo: 'widget' }, branch: 'main' }, protectedPaths: ['b.txt'] });
+    expect(r.outcome).toBe('error');
+    expect(r.message).toContain(sha.slice(0, 7));
+    expect(s.sleeps).toEqual([]);
+  });
+});
+
 describe('the engine qualifies every source-side commit it compares', () => {
   type Compare = { base: string; head: string };
   const compares = (s: ReturnType<typeof scene>): Compare[] => s.gh.calls.filter((c) => c.op === 'compare').map((c) => c.detail as Compare);

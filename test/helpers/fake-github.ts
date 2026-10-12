@@ -126,6 +126,11 @@ export class FakeGitHub implements GitHubPort {
   mergeableLag = 0;
   /** Simulate GitHub truncating a recursive tree listing. */
   treesTruncated = false;
+  /**
+   * The next N tree listings fail as "not reachable": through a fork, a tree pushed to the parent a moment
+   * ago answers 422 for ~3 s (observed live) although its commit is already readable.
+   */
+  treeLagReads = 0;
 
   // ---- test scaffolding -------------------------------------------------------------------
 
@@ -459,6 +464,10 @@ export class FakeGitHub implements GitHubPort {
   async getTreeEntries(repo: RepoRef, treeSha: string): Promise<TreeEntry[]> {
     const r = this.repo(repo);
     this.record('getTreeEntries', r, { treeSha });
+    if (this.treeLagReads > 0) {
+      this.treeLagReads--;
+      throw new CommitNotReachableError(fullName(repo), treeSha);
+    }
     if (this.treesTruncated) throw new TreeTooLargeError(fullName(repo));
     const files = this.trees.get(treeSha);
     if (!files) throw new Error(`fake: unknown tree ${treeSha}`);
@@ -738,18 +747,18 @@ export class FakeGitHub implements GitHubPort {
     if (qualified) {
       const [, owner, inner] = qualified as unknown as [string, string, string];
       const home = [...this.repos.values()].find((x) => x.network === r.network && x.ref.owner.toLowerCase() === owner.toLowerCase());
-      if (!home) throw new CommitNotReachableError(fullName(r.ref), ref);
+      if (!home) throw new CommitNotReachableError(fullName(r.ref), ref.replace(/^[^:/]+:/, ''));
       const branch = home.branches.get(inner);
       if (branch) return branch;
       if (this.visible(r, inner)) return inner;
-      throw new CommitNotReachableError(fullName(r.ref), ref);
+      throw new CommitNotReachableError(fullName(r.ref), ref.replace(/^[^:/]+:/, ''));
     }
     const branch = r.branches.get(ref);
     if (branch) return branch;
     for (const tip of r.branches.values()) {
       if (this.ancestors(tip).has(ref)) return ref;
     }
-    throw new CommitNotReachableError(fullName(r.ref), ref);
+    throw new CommitNotReachableError(fullName(r.ref), ref.replace(/^[^:/]+:/, ''));
   }
 
   private ancestors(sha: string): Set<string> {

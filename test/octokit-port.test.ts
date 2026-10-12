@@ -131,6 +131,11 @@ describe('OctokitPort: compare and merge', () => {
     expect(await t.port.compare(repo, 'main', `acme:${sha}`)).toMatchObject({ status: 'ahead', aheadBy: 1 });
   });
 
+  it('a tree listing that answers 422 "Invalid object requested" is "not reachable (yet)", not a crash', async () => {
+    const t = port([['GET', /git\/trees\//, { status: 422, body: { message: 'Invalid object requested. SHA must identify a commit or a tree.' } }]]);
+    await expect(t.port.getTreeEntries(repo, 'b'.repeat(40))).rejects.toBeInstanceOf(CommitNotReachableError);
+  });
+
   it('compare turns a 404 into CommitNotReachableError (the "not a fork" signal)', async () => {
     const t = port([['GET', /compare\//, { status: 404, body: { message: 'Not Found' } }]]);
     await expect(t.port.compare(repo, 'main', 'f'.repeat(40))).rejects.toBeInstanceOf(CommitNotReachableError);

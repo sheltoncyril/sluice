@@ -535,6 +535,13 @@ that fork (so a cross-owner network). Public repos, one chain, one day: treat it
   than GitHub; it now models the 404 (`test/foreign-commit.test.ts`).
 - The Merges API does **not** accept the qualified form (`head=owner:sha` is a 404 "Head does not
   exist"), so only Compare gets the qualifier.
+- **A push is visible through the fork before its tree is.** Measured: the new commit is readable in
+  under a second, but `git/trees/{tree}?recursive=1` answers **422** "Invalid object requested" for
+  about 3 s. A push webhook is faster than that, and the first fixed sync failed on it. The engine now
+  retries that read with 1, 2, 4, 8 s waits before reporting the commit as not reachable (only when
+  protected paths make it read trees; a source outside the network still fails immediately).
+- Plain `GET git/trees/{tree}` (no `recursive`) through a fork 404s for a parent-only tree **even
+  after five minutes**, while the recursive form works. sluice only uses the recursive listing.
 
 ### Not verified against live GitHub
 
