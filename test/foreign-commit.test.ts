@@ -131,3 +131,25 @@ describe('the engine qualifies every source-side commit it compares', () => {
     expect(baseline!.head).toMatch(/^acme:[0-9a-f]{40}$/);
   });
 });
+
+describe('a failed run always says something', () => {
+  it('records the error type and HTTP status when the error carries no message', async () => {
+    const s = scene();
+    s.gh.commit(UP, 'main', { 'a.txt': '2\n' });
+    s.gh.failNext('getBranchSha', Object.assign(new Error(''), { status: 502 }));
+
+    const r = await s.run();
+    expect(r.outcome).toBe('error');
+    expect(r.message).toBe('Error (HTTP 502) with no message');
+    expect(s.store.runs.at(-1)).toMatchObject({ outcome: 'error', detail: { message: 'Error (HTTP 502) with no message' } });
+  });
+
+  it('still prefers the real message, scrubbed', async () => {
+    const s = scene();
+    s.gh.commit(UP, 'main', { 'a.txt': '2\n' });
+    s.gh.failNext('getBranchSha', new Error('boom ghp_abcdefghijklmnopqrstuvwxyz0123456789'));
+    const r = await s.run();
+    expect(r.message).toContain('boom');
+    expect(r.message).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+  });
+});

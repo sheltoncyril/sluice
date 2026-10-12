@@ -35,6 +35,8 @@ describe('protected paths: the point of them (both sides edited the same file)',
     expect([...openPrs(s.gh)[0]!.labels]).not.toContain('sluice/conflict');
     expect(openPrs(s.gh)[0]!.body).toContain('### Protected paths');
     expect(openPrs(s.gh)[0]!.body).toContain('`patches/x.patch`');
+    // One path reads "1 path ... keeps its", several read "N paths ... keep their".
+    expect(openPrs(s.gh)[0]!.body).toMatch(/1 path listed under `protected_paths` keeps its `main` content/);
   });
 
   it('CONTROL: without protection the very same edits conflict', async () => {

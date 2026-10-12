@@ -121,6 +121,18 @@ const normalise = (s: string) => s.replace(/\r\n/g, '\n').trim();
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
+ * The message recorded for a failed run. A transport error can carry no message at all (seen live: a run
+ * logged as `error` with nothing else), which leaves nothing to act on, so fall back to what is known.
+ */
+export function describeError(e: unknown): string {
+  const text = e instanceof Error ? e.message : String(e);
+  if (text.trim() !== '') return scrubString(text);
+  const name = e instanceof Error ? e.name : typeof e;
+  const status = (e as { status?: unknown } | null)?.status;
+  return `${name}${typeof status === 'number' ? ` (HTTP ${status})` : ''} with no message`;
+}
+
+/**
  * A push webhook reaches us faster than GitHub makes the new objects readable through a fork: measured on
  * a live chain, the commit in under a second but its tree only after ~3 s (422 until then). Retry the
  * read a few times with doubling waits (1+2+4+8 s at most) before believing "not reachable".
@@ -154,7 +166,7 @@ export async function syncHop(spec: HopSpec, deps: HopDeps, opts: HopOptions): P
       rethrow = e;
     } else {
       logger.error('hop failed', errorFields(e));
-      result = { hop: spec.id, chain: spec.chain, outcome: 'error', message: scrubString(e instanceof Error ? e.message : String(e)) };
+      result = { hop: spec.id, chain: spec.chain, outcome: 'error', message: describeError(e) };
     }
   }
 

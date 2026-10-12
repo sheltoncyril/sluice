@@ -542,6 +542,11 @@ that fork (so a cross-owner network). Public repos, one chain, one day: treat it
   protected paths make it read trees; a source outside the network still fails immediately).
 - Plain `GET git/trees/{tree}` (no `recursive`) through a fork 404s for a parent-only tree **even
   after five minutes**, while the recursive form works. sluice only uses the recursive listing.
+- **One sync, end to end** (midstream → downstream, the fast-forward case, one protected path): the
+  PR opened, was labelled and assigned, GitHub reported it mergeable, and it carried exactly the
+  expected file, with the protected `.github/chain.yml` left out. This includes creating the restore
+  commit (tree deletion over a parent-only tree, a commit with a fixed identity and a parent-only
+  parent) and creating a branch at it.
 
 ### Not verified against live GitHub
 
@@ -550,8 +555,9 @@ exercised against the real API from this repo; confirm them with `POST /admin/sy
 and one real sync on a throwaway chain before relying on them:
 
 - *(step 4)* the Merges API accepting the **unreferenced restore commit** as `head` (it is created
-  through the Git Data API and only becomes reachable once merged into the sync branch). The Git Data
-  calls that build it were verified above; the merge of it was not;
+  through the Git Data API and only becomes reachable once merged into the sync branch). Only the
+  fast-forward case was exercised live, where the sync branch is created *at* the restore commit; the
+  case where the target has commits of its own, and so needs this merge, was not;
 - *(step 7)* `GET /repos/{o}/{r}/actions/secrets` returning `updated_at` as assumed (documented, but not
   exercised live), and the Issues permission behaving as described when absent (listing and creating
   issues both refused with 403/404, which the invalid-config report also relies on to stay quiet);

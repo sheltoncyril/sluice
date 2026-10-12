@@ -72,7 +72,7 @@ export function renderSyncPrBody(input: SyncPrInput): string {
     lines.push(
       '',
       '### Protected paths',
-      `${kept.length} path${kept.length === 1 ? '' : 's'} listed under \`protected_paths\` keep their \`${target.branch}\` content; ` +
+      `${kept.length} path${kept.length === 1 ? '' : 's'} listed under \`protected_paths\` ${kept.length === 1 ? 'keeps its' : 'keep their'} \`${target.branch}\` content; ` +
         `upstream changes to ${kept.length === 1 ? 'it' : 'them'} are not applied:`,
     );
     for (const path of kept.slice(0, MAX_PATHS_LISTED)) lines.push(`- \`${path}\``);
