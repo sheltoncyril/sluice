@@ -2,7 +2,9 @@ import { createApp } from './app';
 import type { AppContext } from './context';
 import type { Env } from './env';
 import { parseEnv } from './env';
+import { createEventHandler } from './events';
 import { GitHubApp } from './github/client';
+import { octokitPortFactory } from './github/ports';
 import { createLogger } from './log';
 import { D1Store } from './store/d1';
 
@@ -14,16 +16,20 @@ function getContext(env: Env): AppContext {
   const config = parseEnv(env);
   const logger = createLogger({ level: config.logLevel });
   const github = new GitHubApp({ appId: config.appId, privateKey: config.privateKey, logger });
+  const store = new D1Store(env.DB);
+  const now = () => new Date();
   cached = {
     config,
     logger,
-    store: new D1Store(env.DB),
-    now: () => new Date(),
+    store,
+    now,
     describeApp: () => github.describe(),
-    // Step 3 replaces this with the real router (push → downstream sync, etc.).
-    handleEvent: async (event, log) => {
-      log.info('webhook received (no handler wired yet)', { event: event.name });
-    },
+    handleEvent: createEventHandler({
+      allowedOwners: config.allowedOwners,
+      ports: octokitPortFactory(github),
+      store,
+      now,
+    }),
   };
   return cached;
 }
