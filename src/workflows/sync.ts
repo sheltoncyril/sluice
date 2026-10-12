@@ -4,7 +4,7 @@ import type { PullRequest } from '../github/port';
 import { fullName } from '../github/port';
 import { RateLimitExceededError } from '../github/resilient';
 import type { Logger } from '../log';
-import { errorFields, scrubString } from '../log';
+import { describeError, errorFields, scrubString } from '../log';
 import type { ChainDeps, ChainHandle } from '../sync/chain';
 import { conflictPolicyOf, prMetaOf } from '../sync/chain';
 import { awaitMergeable, reconcileConflict } from '../sync/conflict';
@@ -95,7 +95,7 @@ export async function syncWorkflows(
         repo: role === 'midstream' ? fullName(handle.holder) : handle.config.downstream.repo,
         outcome: limited ? 'rate_limited' : 'error',
         drift: [],
-        message: scrubString(e instanceof Error ? e.message : String(e)).slice(0, 400),
+        message: describeError(e).slice(0, 400),
       };
     }
     targets.push(result);
