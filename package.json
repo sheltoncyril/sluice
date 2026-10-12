@@ -1,0 +1,41 @@
+{
+  "name": "chain-sync",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Serverless GitHub App that keeps an upstream → midstream → downstream repo chain in sync through PRs.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "d1:migrate:local": "wrangler d1 migrations apply chain-sync --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply chain-sync --remote",
+    "convert-key": "node scripts/convert-private-key.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@octokit/app": "^16.1.4",
+    "@octokit/core": "^7.0.8",
+    "@octokit/plugin-paginate-rest": "^15.0.0",
+    "@octokit/request-error": "^7.1.2",
+    "@octokit/types": "^18.0.0",
+    "@octokit/webhooks": "^14.2.0",
+    "hono": "^4.13.13",
+    "picomatch": "^4.0.7",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261012.1",
+    "@types/node": "^22.20.5",
+    "@types/picomatch": "^4.0.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.149.0"
+  }
+}

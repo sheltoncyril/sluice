@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chain-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Hourly upstream poll. Per-chain `hops.upstream_to_midstream.poll_interval_minutes`
+  // in .github/chain.yml can only *slow this down* (it cannot run more often than the cron).
+  "triggers": { "crons": ["0 * * * *"] },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "chain-sync",
+      // Replace with the id printed by `wrangler d1 create chain-sync`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "vars": {
+    // Comma-separated GitHub account/org logins whose installations this Worker will act on.
+    // REQUIRED. The app has to be public to be installed across orgs, so anyone could install it;
+    // this allowlist is what stops them from driving your Worker. Empty = refuse everything.
+    "ALLOWED_OWNERS": "",
+    "LOG_LEVEL": "info"
+  },
+
+  // NOTE: Workers Logs persist everything written with console.*. This codebase never logs
+  // request bodies or secret values, and routes them through a redacting logger.
+  "observability": { "enabled": true }
+
+  // Secrets (set with `wrangler secret put`, never in this file):
+  //   GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY (PKCS#8 PEM), GITHUB_WEBHOOK_SECRET, ADMIN_TOKEN
+}
