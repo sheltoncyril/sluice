@@ -67,7 +67,15 @@ export async function planProtection(
   return { changes, paths: changes.map((c) => c.path), source };
 }
 
-const IDENTITY = { name: 'sluice', email: 'sluice@users.noreply.github.com' } as const;
+/**
+ * The author and committer of restore commits. Fixed, so the commit SHA is deterministic.
+ *
+ * The address must not belong to any GitHub account: GitHub links a commit to whichever account owns
+ * its email, and `<name>@users.noreply.github.com` is that account's own address. sluice@users.noreply...
+ * resolves to a real, unrelated user, and the PR then showed their name and avatar. `.invalid` is
+ * reserved (RFC 2606) and can never be registered, so this commit links to nobody.
+ */
+export const RESTORE_COMMIT_IDENTITY = { name: 'sluice', email: 'sluice@sluice.invalid' } as const;
 
 /** Create the restore commit for a plan. Idempotent: same inputs, same SHA. */
 export async function createRestoreCommit(
@@ -76,6 +84,8 @@ export async function createRestoreCommit(
   plan: ProtectionPlan,
   sourceSha: string,
   targetBranch: string,
+  /** Who the commit is attributed to; the app's bot when known, else an address that links to nobody. */
+  identity: { name: string; email: string } = RESTORE_COMMIT_IDENTITY,
 ): Promise<string> {
   const treeSha = await port.createTree(repo, plan.source.treeSha, plan.changes);
   const n = plan.paths.length;
@@ -86,6 +96,6 @@ export async function createRestoreCommit(
       `sluice: keep ${n} protected path${n === 1 ? '' : 's'} as in ${fullName(repo)}:${targetBranch}\n\n` +
       `Upstream changes to protected paths are discarded; everything else is the source commit.\n` +
       `sluice-source: ${sourceSha}`,
-    identity: { ...IDENTITY, date: plan.source.committerDate },
+    identity: { ...identity, date: plan.source.committerDate },
   });
 }

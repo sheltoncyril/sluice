@@ -18,6 +18,8 @@ export interface ChainDeps {
   allowedOwners: ReadonlySet<string>;
   /** Injectable for tests; defaults to a real timer. Used while waiting for GitHub to compute mergeability. */
   sleep?: (ms: number) => Promise<void>;
+  /** The app's own commit identity (its bot account). Absent in tests and on lookup failure. */
+  commitIdentity?: () => Promise<{ name: string; email: string } | null>;
 }
 
 /** A chain whose config has been loaded, plus the port for the midstream installation. */
@@ -156,6 +158,7 @@ export async function syncChainHop(
       logger,
       now: deps.now,
       ...(deps.sleep ? { sleep: deps.sleep } : {}),
+      ...(deps.commitIdentity ? { commitIdentity: deps.commitIdentity } : {}),
     },
     { trigger: opts.trigger, ...(opts.deliveryId ? { deliveryId: opts.deliveryId } : {}), ...(opts.dryRun ? { dryRun: true } : {}) },
   );

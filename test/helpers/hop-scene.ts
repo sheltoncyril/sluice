@@ -35,8 +35,8 @@ export function scene(mergeMethod: MergeMethod = 'merge', files: Record<string, 
     now,
     sleep: async (ms) => void sleeps.push(ms),
   };
-  const run = (opts: Partial<HopOptions> = {}, over: Partial<HopSpec> = {}) =>
-    syncHop({ ...spec, ...over }, deps, { trigger: 'cron', ...opts });
+  const run = (opts: Partial<HopOptions> = {}, over: Partial<HopSpec> = {}, depsOver: Partial<HopDeps> = {}) =>
+    syncHop({ ...spec, ...over }, { ...deps, ...depsOver }, { trigger: 'cron', ...opts });
   return { gh, store, spec, run, sleeps };
 }
 

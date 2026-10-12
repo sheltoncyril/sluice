@@ -498,7 +498,7 @@ export class FakeGitHub implements GitHubPort {
   /** Content-addressed, like git: identical inputs return the identical commit. */
   async createCommit(repo: RepoRef, commit: NewCommit): Promise<string> {
     const r = this.repo(repo);
-    this.record('createCommit', r, { parents: commit.parents });
+    this.record('createCommit', r, { parents: commit.parents, identity: commit.identity ?? null });
     this.maybeFail('createCommit');
     const sha = this.sha1(`commit:${JSON.stringify([commit.treeSha, commit.parents, commit.message, commit.identity ?? null])}`);
     if (!this.commits.has(sha)) {

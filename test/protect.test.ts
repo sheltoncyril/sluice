@@ -16,8 +16,8 @@ const PROTECT = ['patches/**', 'LICENSE', '.github/workflows/**'];
 
 function protectedScene(patterns: string[] = PROTECT, method: 'merge' | 'squash' | 'rebase' = 'merge') {
   const s = scene(method, FILES);
-  const run = (opts: Parameters<typeof s.run>[0] = {}, over: Partial<HopSpec> = {}) =>
-    s.run(opts, { protectedPaths: patterns, ...over });
+  const run = (opts: Parameters<typeof s.run>[0] = {}, over: Partial<HopSpec> = {}, depsOver: Parameters<typeof s.run>[2] = {}) =>
+    s.run(opts, { protectedPaths: patterns, ...over }, depsOver);
   return { ...s, run };
 }
 const writes = (gh: ReturnType<typeof scene>['gh']) => gh.writes().map((w) => w.op);
@@ -37,6 +37,20 @@ describe('protected paths: the point of them (both sides edited the same file)',
     expect(openPrs(s.gh)[0]!.body).toContain('`patches/x.patch`');
     // One path reads "1 path ... keeps its", several read "N paths ... keep their".
     expect(openPrs(s.gh)[0]!.body).toMatch(/1 path listed under `protected_paths` keeps its `main` content/);
+  });
+
+  it('authors the restore commit as an address that belongs to no GitHub account', async () => {
+    const s = protectedScene();
+    s.gh.commit(MID, 'main', { 'patches/x.patch': 'MIDSTREAM patch\n' });
+    s.gh.commit(UP, 'main', { 'patches/x.patch': 'upstream rewrote it\n', 'a.txt': 'a2\n' });
+    await s.run();
+
+    const made = s.gh.calls.filter((c) => c.op === 'createCommit').map((c) => (c.detail as { identity: { name: string; email: string } | null }).identity);
+    expect(made).toHaveLength(1);
+    // `<anything>@users.noreply.github.com` is a real account's own address and GitHub links the commit
+    // to it (sluice@users.noreply... is a real, unrelated user). `.invalid` can never be registered.
+    expect(made[0]!.email).toMatch(/@[a-z0-9.-]+\.invalid$/);
+    expect(made[0]!.email).not.toContain('github.com');
   });
 
   it('CONTROL: without protection the very same edits conflict', async () => {
@@ -253,5 +267,49 @@ describe('matcher', () => {
   });
   it('does not match what they do not', () => {
     for (const p of ['docs/README.md', 'src/c.ts', 'patchesx/y', 'a/patches/x']) expect(m(p), p).toBe(false);
+  });
+});
+
+describe('who restore commits are attributed to', () => {
+  const identityOfRestoreCommit = (s: ReturnType<typeof protectedScene>) => {
+    const made = s.gh.calls.filter((c) => c.op === 'createCommit').map((c) => (c.detail as { identity: { name: string; email: string } | null }).identity);
+    expect(made).toHaveLength(1);
+    return made[0]!;
+  };
+  const upstreamTouchesProtectedFile = (s: ReturnType<typeof protectedScene>) => {
+    s.gh.commit(MID, 'main', { 'patches/x.patch': 'MIDSTREAM patch\n' });
+    s.gh.commit(UP, 'main', { 'patches/x.patch': 'upstream rewrote it\n', 'a.txt': 'a2\n' });
+  };
+
+  it("uses the app's own bot account when the Worker knows it", async () => {
+    const s = protectedScene();
+    upstreamTouchesProtectedFile(s);
+    const bot = { name: 'sluice-gates[bot]', email: '341672498+sluice-gates[bot]@users.noreply.github.com' };
+
+    await s.run({}, {}, { commitIdentity: async () => bot });
+    expect(identityOfRestoreCommit(s)).toMatchObject(bot);
+  });
+
+  it('falls back to an address that links to no account when the lookup yields nothing or fails', async () => {
+    for (const lookup of [async () => null, async () => Promise.reject(new Error('boom'))]) {
+      const s = protectedScene();
+      upstreamTouchesProtectedFile(s);
+      const r = await s.run({}, {}, { commitIdentity: lookup }).catch((e: Error) => e);
+      // A rejecting lookup must not take the sync down with it: treat it as "unknown".
+      expect(r).not.toBeInstanceOf(Error);
+      expect(identityOfRestoreCommit(s).email).toMatch(/\.invalid$/);
+    }
+  });
+
+  it('only looks the identity up when a restore commit is actually created', async () => {
+    const s = protectedScene();
+    let lookups = 0;
+    const commitIdentity = async () => (lookups++, null);
+
+    await s.run({}, {}, { commitIdentity }); // nothing upstream changed: no restore commit
+    expect(lookups).toBe(0);
+    upstreamTouchesProtectedFile(s);
+    await s.run({}, {}, { commitIdentity });
+    expect(lookups).toBe(1);
   });
 });

@@ -255,8 +255,14 @@ file), parented on the source tip. That commit is what gets merged, so:
 - everything else in the PR is the normal sync;
 - the source tip is still an ancestor, so "up to date" detection converges once the PR lands.
 
-The commit is deterministic (fixed identity `sluice <sluice@users.noreply.github.com>` and the
-source commit's date), so re-runs and overlapping runs produce the same object. A run that changes
+The commit is deterministic (a fixed identity and the source commit's date), so re-runs and
+overlapping runs produce the same object. The identity is the **app's own bot account**
+(`<slug>[bot]`, with GitHub's noreply address `<bot user id>+<slug>[bot]@users.noreply.github.com`),
+looked up once per isolate from `GET /app` and `GET /users/<slug>[bot]`, so GitHub shows the app's name
+and logo on it. If that lookup fails it falls back to `sluice <sluice@sluice.invalid>`: an address no
+GitHub account can own. That matters because GitHub links a commit to whichever account owns its email;
+an earlier fixed choice, `sluice@users.noreply.github.com`, belongs to a real unrelated user, whose name
+and avatar then appeared on the PR. A run that changes
 nothing creates **no** objects. The PR body lists the protected paths that were kept. `dry_run`
 reports them as `plan.protectedPaths`.
 
@@ -548,16 +554,22 @@ that fork (so a cross-owner network). Public repos, one chain, one day: treat it
   commit (tree deletion over a parent-only tree, a commit with a fixed identity and a parent-only
   parent) and creating a branch at it.
 
+- **The merge path, and a second cycle.** After PR #1 was merged (so the target had commits of its
+  own), the next push made the engine create a restore commit and have the **Merges API merge it into
+  the sync branch** (a `<slug>[bot]` merge commit with two parents), open a second PR, and that PR
+  merged cleanly. So the Merges API does accept the unreferenced restore commit as `head`. After both
+  merges the downstream's files equalled the midstream's, minus the protected `.github/chain.yml`.
+- **Commit attribution.** A commit's author is linked to whichever GitHub account owns its email.
+  `<name>@users.noreply.github.com` is that account's own address; an address on the `.invalid` TLD
+  links to nobody; `<id>+<slug>[bot]@users.noreply.github.com` links to the app's bot (shown with
+  type `Bot`).
+
 ### Not verified against live GitHub
 
 These behaviours are asserted from GitHub's documentation and experience but have **not** been
 exercised against the real API from this repo; confirm them with `POST /admin/sync` + `dry_run`
 and one real sync on a throwaway chain before relying on them:
 
-- *(step 4)* the Merges API accepting the **unreferenced restore commit** as `head` (it is created
-  through the Git Data API and only becomes reachable once merged into the sync branch). Only the
-  fast-forward case was exercised live, where the sync branch is created *at* the restore commit; the
-  case where the target has commits of its own, and so needs this merge, was not;
 - *(step 7)* `GET /repos/{o}/{r}/actions/secrets` returning `updated_at` as assumed (documented, but not
   exercised live), and the Issues permission behaving as described when absent (listing and creating
   issues both refused with 403/404, which the invalid-config report also relies on to stay quiet);

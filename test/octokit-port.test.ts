@@ -345,7 +345,7 @@ describe('OctokitPort: git data (protected paths)', () => {
 
   it('createCommit uses ONE identity for author and committer (so the hash is deterministic)', async () => {
     const t = port([['POST', /git\/commits$/, { status: 201, body: { sha: 'newcommit' } }]]);
-    const identity = { name: 'sluice', email: 'sluice@users.noreply.github.com', date: '2026-01-02T03:04:05Z' };
+    const identity = { name: 'sluice', email: 'sluice@sluice.invalid', date: '2026-01-02T03:04:05Z' };
     expect(await t.port.createCommit(repo, { message: 'm', treeSha: 'tree1', parents: ['p1'], identity })).toBe('newcommit');
     expect(t.seen[0]!.body).toEqual({ message: 'm', tree: 'tree1', parents: ['p1'], author: identity, committer: identity });
   });

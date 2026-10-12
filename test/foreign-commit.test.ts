@@ -153,3 +153,13 @@ describe('a failed run always says something', () => {
     expect(r.message).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
   });
 });
+
+describe('the app bot identity', () => {
+  it("is GitHub's noreply form <bot user id>+<slug>[bot]@users.noreply.github.com", async () => {
+    const { botCommitIdentity } = await import('../src/github/client');
+    expect(botCommitIdentity('sluice-gates', 341672498)).toEqual({
+      name: 'sluice-gates[bot]',
+      email: '341672498+sluice-gates[bot]@users.noreply.github.com',
+    });
+  });
+});

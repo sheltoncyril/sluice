@@ -61,6 +61,11 @@ export interface HopDeps {
   sleep?: (ms: number) => Promise<void>;
   /** How hard to poll GitHub's lazily computed `mergeable`. */
   polling?: MergeabilityPolling;
+  /**
+   * Who restore commits are attributed to, looked up only when one is actually created. Null or absent
+   * means the fixed fallback identity, which links to no GitHub account.
+   */
+  commitIdentity?: () => Promise<{ name: string; email: string } | null>;
 }
 
 export interface HopOptions {
@@ -297,7 +302,17 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   // (created lazily, so a run that changes nothing creates no objects).
   let restored: string | undefined;
   const effective = async (): Promise<string> =>
-    protection ? (restored ??= await createRestoreCommit(out, target.repo, protection, sourceSha, target.branch)) : sourceSha;
+    protection
+      ? (restored ??= await createRestoreCommit(
+          out,
+          target.repo,
+          protection,
+          sourceSha,
+          target.branch,
+          // An identity that cannot be looked up is "unknown", never a reason to fail the sync.
+          (await deps.commitIdentity?.().catch(() => null)) ?? undefined,
+        ))
+      : sourceSha;
 
   // Target has no commits of its own -> the branch can simply BE that commit (fast-forward).
   // Otherwise start from the target tip and let GitHub merge it in.
