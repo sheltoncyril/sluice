@@ -9,32 +9,7 @@ import { syncHop } from '../src/sync/hop';
 import type { HopOptions, HopSpec } from '../src/sync/hop';
 import { MemoryStore } from '../src/store/memory';
 import { FakeGitHub } from './helpers/fake-github';
-
-const UP = 'acme/widget';
-const MID = 'me/widget';
-const BRANCH = 'chain/sync-upstream';
-const now = () => new Date('2026-10-12T12:00:00Z');
-
-function scene(mergeMethod: MergeMethod = 'merge') {
-  const gh = new FakeGitHub().createRepo(UP, { 'a.txt': '1\n', 'b.txt': '1\n', 'c.txt': '1\n' });
-  gh.fork(UP, MID);
-  const store = new MemoryStore();
-  const spec: HopSpec = {
-    id: 'upstream_to_midstream',
-    chain: MID,
-    source: { repo: { owner: 'acme', repo: 'widget' }, branch: 'main' },
-    target: { repo: { owner: 'me', repo: 'widget' }, branch: 'main' },
-    syncBranch: BRANCH,
-    mergeMethod,
-    protectedPaths: [],
-    pr: { labels: ['sluice'], assignees: ['octocat'], reviewers: ['octocat'], teamReviewers: [], draft: false },
-  };
-  const run = (opts: Partial<HopOptions> = {}, over: Partial<HopSpec> = {}) =>
-    syncHop({ ...spec, ...over }, { sourcePort: gh, targetPort: gh, store, logger: nullLogger, now }, { trigger: 'cron', ...opts });
-  return { gh, store, spec, run };
-}
-
-const openPrs = (gh: FakeGitHub) => gh.prs(MID).filter((p) => p.state === 'open');
+import { BRANCH, MID, now, openPrs, scene, UP } from './helpers/hop-scene';
 
 describe('hop sync: opening the PR', () => {
   it('does nothing when midstream already has everything', async () => {

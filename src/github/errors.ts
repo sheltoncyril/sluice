@@ -27,3 +27,14 @@ export class ProtectedBranchWriteError extends Error {
     this.name = 'ProtectedBranchWriteError';
   }
 }
+
+/** The repo tree is too large for GitHub to list in one response, so protected paths cannot be applied safely. */
+export class TreeTooLargeError extends Error {
+  constructor(repo: string) {
+    super(
+      `the file tree of ${repo} is too large for GitHub to list in one response (truncated); ` +
+        `protected_paths cannot be enforced safely, so the sync was not attempted`,
+    );
+    this.name = 'TreeTooLargeError';
+  }
+}
