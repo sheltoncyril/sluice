@@ -1,6 +1,7 @@
 import type { RuntimeConfig } from './env';
 import type { Logger } from './log';
 import type { Store } from './store/types';
+import type { AdminSyncInput, AdminSyncResponse } from './sync/admin';
 
 /** A verified GitHub webhook delivery. `payload` is untyped until a handler narrows it. */
 export interface WebhookEvent {
@@ -22,4 +23,6 @@ export interface AppContext {
   handleEvent(event: WebhookEvent, logger: Logger): Promise<void>;
   /** For /admin/whoami: proves JWT signing and key conversion work in the deployed runtime. */
   describeApp(): Promise<unknown>;
+  /** Operator-triggered "sync this hop now" (optionally a dry run). */
+  runSync(input: AdminSyncInput): Promise<AdminSyncResponse>;
 }

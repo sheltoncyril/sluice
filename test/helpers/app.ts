@@ -37,6 +37,7 @@ export function makeHarness(overrides: Partial<AppContext> = {}): Harness {
       events.push(e);
     },
     describeApp: async () => ({ app: { id: 1 }, installations: [] }),
+    runSync: async () => ({ ok: false, status: 404, error: 'not wired in this test' }),
     ...overrides,
   };
 

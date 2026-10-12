@@ -2,7 +2,7 @@
  * GitHub gives you a PKCS#1 key ("-----BEGIN RSA PRIVATE KEY-----"). WebCrypto, and therefore
  * Workers, can only import PKCS#8 ("-----BEGIN PRIVATE KEY-----"). Convert it once:
  *
- *   npm run convert-key -- path/to/app.private-key.pem > private-key-pkcs8.pem
+ *   node scripts/convert-private-key.mjs path/to/app.private-key.pem > private-key-pkcs8.pem
  *   # or: openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in app.pem -out pkcs8.pem
  */
 
@@ -28,7 +28,7 @@ export function assertPkcs8(pem: string): void {
   if (/-----BEGIN RSA PRIVATE KEY-----/.test(pem)) {
     throw new PrivateKeyFormatError(
       'GITHUB_APP_PRIVATE_KEY is a PKCS#1 key (BEGIN RSA PRIVATE KEY). Workers need PKCS#8 (BEGIN PRIVATE KEY): ' +
-        'run `npm run convert-key -- <key.pem>` and re-upload with `wrangler secret put GITHUB_APP_PRIVATE_KEY`.',
+        'run `node scripts/convert-private-key.mjs <key.pem> > pkcs8.pem` and re-upload with `wrangler secret put GITHUB_APP_PRIVATE_KEY`.',
     );
   }
   if (!/-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----/.test(pem)) {

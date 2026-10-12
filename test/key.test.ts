@@ -23,7 +23,7 @@ describe('private key handling', () => {
       message = (e as Error).message;
     }
     expect(message).toMatch(/PKCS#1/);
-    expect(message).toMatch(/convert-key/);
+    expect(message).toMatch(/convert-private-key\.mjs/);
     expect(message).not.toContain(keys.pkcs1.split('\n')[1]!);
   });
 
@@ -48,6 +48,7 @@ describe('private key handling', () => {
     const out = execFileSync('node', ['scripts/convert-private-key.mjs', input], { encoding: 'utf8' });
     expect(out).toContain('BEGIN PRIVATE KEY');
     expect(out).not.toContain('RSA PRIVATE KEY');
+    expect(out.startsWith('-----BEGIN PRIVATE KEY-----')).toBe(true); // stdout is ONLY the key (safe to redirect)
     await expect(assertKeyImports(out)).resolves.toBeUndefined();
   });
 

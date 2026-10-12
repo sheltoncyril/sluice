@@ -1,3 +1,4 @@
+import type { DiscoveryApi } from '../sync/discover';
 import type { GitHubApp } from './client';
 import { OctokitPort } from './octokit-port';
 import type { GitHubPort, RepoRef } from './port';
@@ -18,5 +19,15 @@ export function octokitPortFactory(app: GitHubApp): PortFactory {
       const client = await app.forRepo(repo.owner, repo.repo);
       return client ? new OctokitPort(client) : null;
     },
+  };
+}
+
+/** Installation enumeration for the scheduled scan, backed by the GitHub App. */
+export function octokitDiscovery(app: GitHubApp): DiscoveryApi {
+  return {
+    async listInstallations() {
+      return (await app.listInstallations()).map((i) => ({ id: i.id, login: i.login, suspended: i.suspended }));
+    },
+    listRepositories: (installationId) => app.listInstallationRepos(installationId),
   };
 }

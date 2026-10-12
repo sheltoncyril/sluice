@@ -13,6 +13,8 @@ export interface Env {
 
   // Plain vars
   ALLOWED_OWNERS?: string;
+  /** Optional "owner/name,owner/name" list of midstream repos; skips scanning every repo. */
+  CHAIN_REPOS?: string;
   LOG_LEVEL?: string;
 }
 
@@ -23,6 +25,8 @@ export interface RuntimeConfig {
   adminToken: string;
   /** Lower-cased account logins this Worker may act on. */
   allowedOwners: ReadonlySet<string>;
+  /** Lower-cased "owner/name" midstream repos, or empty to scan all allowlisted installations. */
+  chainRepos: ReadonlySet<string>;
   logLevel: LogLevel;
 }
 
@@ -63,6 +67,16 @@ export function parseEnv(env: Partial<Env>): RuntimeConfig {
     problems.push('ALLOWED_OWNERS is empty (refusing to act on any installation; see README)');
   }
 
+  const chainRepos = new Set(
+    (env.CHAIN_REPOS ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  for (const r of chainRepos) {
+    if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(r)) problems.push(`CHAIN_REPOS entry "${r}" is not "owner/name"`);
+  }
+
   if (appId && !/^\d+$/.test(appId.trim())) problems.push('GITHUB_APP_ID must be numeric');
   if (adminToken && adminToken.length < 24) problems.push('ADMIN_TOKEN must be at least 24 characters');
 
@@ -74,6 +88,7 @@ export function parseEnv(env: Partial<Env>): RuntimeConfig {
     webhookSecret,
     adminToken,
     allowedOwners,
+    chainRepos,
     logLevel: parseLogLevel(env.LOG_LEVEL),
   };
 }

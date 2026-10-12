@@ -122,6 +122,13 @@ export class GitHubApp {
     });
   }
 
+  /** Repos an installation can see (archived and disabled ones excluded: nothing to sync there). */
+  async listInstallationRepos(installationId: number): Promise<Array<{ owner: string; repo: string }>> {
+    const client = await this.forInstallation(installationId);
+    const repos = await client.paginate('GET /installation/repositories', { per_page: 100 });
+    return repos.filter((r) => !r.archived && !r.disabled).map((r) => ({ owner: r.owner.login, repo: r.name }));
+  }
+
   /** Who am I? Used by /admin/whoami to prove the JWT + key conversion work in the deployed Worker. */
   async describe(): Promise<{
     app: { id: number; slug: string | null; name: string; permissions: Record<string, string>; events: string[] };

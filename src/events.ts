@@ -1,17 +1,12 @@
 import type { EmitterWebhookEvent } from '@octokit/webhooks';
 import { validateConfigOnPullRequest } from './config/validate-pr';
 import type { WebhookEvent } from './context';
-import type { PortFactory } from './github/ports';
 import type { Logger } from './log';
 import { isOwnerAllowed } from './policy';
-import type { Store } from './store/types';
+import type { ChainDeps } from './sync/chain';
+import { syncDownstreamOnPush } from './sync/downstream';
 
-export interface EventHandlerDeps {
-  allowedOwners: ReadonlySet<string>;
-  ports: PortFactory;
-  store: Store;
-  now: () => Date;
-}
+export type EventHandlerDeps = ChainDeps;
 
 const PR_ACTIONS_THAT_CHANGE_CONTENT = new Set(['opened', 'reopened', 'synchronize', 'edited']);
 
@@ -24,6 +19,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
     switch (event.name) {
       case 'pull_request':
         return onPullRequest(deps, event.payload as EmitterWebhookEvent<'pull_request'>['payload'], logger);
+      case 'push':
+        return onPush(deps, event.id, event.payload as EmitterWebhookEvent<'push'>['payload'], logger);
       case 'installation':
       case 'installation_repositories':
         return onInstallation(
@@ -65,6 +62,29 @@ async function onPullRequest(
     deps.now,
   );
   logger.info('pull_request processed', { repo: `${repo.owner}/${repo.repo}`, pr: payload.pull_request.number, outcome });
+}
+
+async function onPush(
+  deps: EventHandlerDeps,
+  deliveryId: string,
+  payload: EmitterWebhookEvent<'push'>['payload'],
+  logger: Logger,
+): Promise<void> {
+  const repoOwner = payload.repository.owner as { login?: string; name?: string } | null;
+  const owner = repoOwner?.login ?? repoOwner?.name;
+  if (!owner || !isOwnerAllowed(deps.allowedOwners, owner)) {
+    logger.debug('push ignored: owner not allowlisted', { owner });
+    return;
+  }
+  const installationId = (payload as { installation?: { id: number } }).installation?.id;
+  if (!installationId) return;
+
+  const result = await syncDownstreamOnPush(
+    deps,
+    { deliveryId, installationId, repo: { owner, repo: payload.repository.name }, ref: payload.ref, deleted: payload.deleted },
+    logger,
+  );
+  if (result) logger.info('push processed', { chain: result.chain, hop: result.hop, outcome: result.outcome, pr: result.prNumber });
 }
 
 async function onInstallation(
