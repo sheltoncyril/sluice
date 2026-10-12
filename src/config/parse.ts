@@ -220,8 +220,12 @@ function translateIssue(issue: z.core.$ZodIssue, doc: Document, lc: LineCounter)
     return issue.keys.map((key) => {
       const pos = locateKey(doc, lc, path, key);
       const guess = closest(key, known);
-      const echo = guess !== undefined || schemaVocabulary().has(key);
+      // A near-miss of a word that is valid somewhere else in the file (a nested key typed at the top
+      // level, say). Still safe to echo: it is within a couple of edits of a schema word.
+      const elsewhere = guess === undefined && !schemaVocabulary().has(key) ? closest(key, [...schemaVocabulary()]) : undefined;
+      const echo = guess !== undefined || elsewhere !== undefined || schemaVocabulary().has(key);
       const moved = path.length === 0 && echo ? MOVED_KEYS[key] : undefined;
+      const movedGuess = path.length === 0 && elsewhere ? MOVED_KEYS[elsewhere] : undefined;
       return {
         severity: 'error' as const,
         path: pathToString(echo ? [...shownParent, key] : shownParent),
@@ -229,9 +233,11 @@ function translateIssue(issue: z.core.$ZodIssue, doc: Document, lc: LineCounter)
           ? `unknown key (${moved})`
           : guess
             ? `unknown key (did you mean "${guess}"?)`
-            : echo
-              ? 'unknown key'
-              : 'unknown key (its name is not shown; see the position)',
+            : elsewhere
+              ? `unknown key (did you mean "${elsewhere}"?${movedGuess ? ` ${movedGuess}` : ` It is a valid key, but not here.`})`
+              : echo
+                ? 'unknown key'
+                : 'unknown key (its name is not shown; see the position)',
         ...(pos ? { line: pos.line, column: pos.col } : {}),
       };
     });
