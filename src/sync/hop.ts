@@ -181,11 +181,17 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   let closedCache: PullRequest[] | undefined;
   const closed = async () => (closedCache ??= await out.listClosedPullRequests(target.repo, spec.syncBranch, target.branch, 10));
 
+  // A source commit lives in another repo of the fork network. GitHub's Compare API 404s on such a SHA
+  // given bare (verified on a live user -> org fork chain; createBranch, the Merges API and the Git Data
+  // endpoints all accept it bare), but resolves it when qualified with the owner, which is the form the
+  // API documents for comparing across a network. Only compare calls need this.
+  const fromSource = (sha: string) => `${source.repo.owner}:${sha}`;
+
   // ---- Is the target behind the source? ----------------------------------------------------
   const ancestry: CompareResult =
     sourceSha === targetSha
       ? { status: 'identical', aheadBy: 0, behindBy: 0, commits: [], htmlUrl: '' }
-      : await out.compare(target.repo, target.branch, sourceSha);
+      : await out.compare(target.repo, target.branch, fromSource(sourceSha));
 
   let pending = ancestry.aheadBy > 0;
   let described = ancestry; // what the PR body lists as "commits"
@@ -196,7 +202,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
     if (baseline === sourceSha) {
       pending = false;
     } else if (baseline) {
-      described = await out.compare(target.repo, baseline, sourceSha);
+      described = await out.compare(target.repo, fromSource(baseline), fromSource(sourceSha));
       pending = described.aheadBy > 0;
     }
   }
@@ -301,7 +307,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   // already contains the source (then re-running is a no-op).
   const needsMerge = freshBranch
     ? !fastForward
-    : branchSha !== sourceSha && (await out.compare(target.repo, spec.syncBranch, sourceSha)).aheadBy > 0;
+    : branchSha !== sourceSha && (await out.compare(target.repo, spec.syncBranch, fromSource(sourceSha))).aheadBy > 0;
 
   let structuralConflict = false; // GitHub refused the merge just now (evidence, before it has polled)
   if (needsMerge) {

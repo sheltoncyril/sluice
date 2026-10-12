@@ -328,8 +328,8 @@ export class FakeGitHub implements GitHubPort {
     const r = this.repo(repo);
     this.record('compare', r, { base, head });
     this.maybeFail('compare');
-    const b = this.resolve(r, base);
-    const h = this.resolve(r, head);
+    const b = this.resolveForCompare(r, base);
+    const h = this.resolveForCompare(r, head);
     const ancB = this.ancestors(b);
     const ancH = this.ancestors(h);
     const headOnly = [...ancH].filter((s) => !ancB.has(s));
@@ -723,6 +723,33 @@ export class FakeGitHub implements GitHubPort {
     if (byBranch) return byBranch;
     if (this.visible(r, refOrSha)) return refOrSha;
     throw new CommitNotReachableError(fullName(r.ref), refOrSha);
+  }
+
+  /**
+   * What GitHub's Compare API accepts, as observed against a real fork network (user -> org, public):
+   *  - a branch of this repo, or a commit reachable from one of this repo's branches;
+   *  - `owner:ref` for a branch or commit that lives in another repo of the same network.
+   * A BARE commit that exists only in another repo of the network is a 404, although createBranch, the
+   * Merges API and the Git Data endpoints do accept it. That asymmetry is why the engine qualifies
+   * source-side SHAs with the source owner.
+   */
+  private resolveForCompare(r: FakeRepo, ref: string): string {
+    const qualified = /^([^:/]+):(.+)$/.exec(ref);
+    if (qualified) {
+      const [, owner, inner] = qualified as unknown as [string, string, string];
+      const home = [...this.repos.values()].find((x) => x.network === r.network && x.ref.owner.toLowerCase() === owner.toLowerCase());
+      if (!home) throw new CommitNotReachableError(fullName(r.ref), ref);
+      const branch = home.branches.get(inner);
+      if (branch) return branch;
+      if (this.visible(r, inner)) return inner;
+      throw new CommitNotReachableError(fullName(r.ref), ref);
+    }
+    const branch = r.branches.get(ref);
+    if (branch) return branch;
+    for (const tip of r.branches.values()) {
+      if (this.ancestors(tip).has(ref)) return ref;
+    }
+    throw new CommitNotReachableError(fullName(r.ref), ref);
   }
 
   private ancestors(sha: string): Set<string> {

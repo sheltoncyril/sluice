@@ -518,18 +518,33 @@ server-side three-way merges with conflicts, PRs landing by merge/squash/rebase)
 against it; `test/octokit-port.test.ts` pins the real adapter's request shapes and GitHub's
 error responses with a mocked HTTP layer.
 
+### Verified against live GitHub
+
+Checked by hand on one chain on 2026-10-12: a public repo → a user-owned fork → an org-owned fork of
+that fork (so a cross-owner network). Public repos, one chain, one day: treat it as evidence, not proof.
+
+- **Objects are shared across the network, across owners.** A commit that exists only in the parent
+  can be used from the fork by: `POST git/refs` (create a ref at it), the Merges API as `head` (bare
+  SHA), `GET git/commits/{sha}`, `GET git/trees/{sha}?recursive=1`, `POST git/trees` with it as
+  `base_tree`, and `POST git/commits` with it as a `parent`.
+- **The Compare API does not, when the SHA is bare.** `compare/{branch}...{sha}` is a **404** for a
+  commit that is on no branch of that repo, even though every call above accepts it. It resolves the
+  same commit as `{owner}:{sha}`, which is the form the API documents for comparing across a network.
+  sluice qualifies every source-side SHA it compares with the source repo's owner. The first live
+  sync of the chain above failed on exactly this, and the in-memory test double had been more lenient
+  than GitHub; it now models the 404 (`test/foreign-commit.test.ts`).
+- The Merges API does **not** accept the qualified form (`head=owner:sha` is a 404 "Head does not
+  exist"), so only Compare gets the qualifier.
+
 ### Not verified against live GitHub
 
 These behaviours are asserted from GitHub's documentation and experience but have **not** been
 exercised against the real API from this repo; confirm them with `POST /admin/sync` + `dry_run`
 and one real sync on a throwaway chain before relying on them:
 
-- creating a ref in a fork that points at a commit that only exists in the parent repo;
-- `compare` and the Merges API accepting such a SHA;
-- cross-org forks sharing objects as assumed;
 - *(step 4)* the Merges API accepting the **unreferenced restore commit** as `head` (it is created
-  through the Git Data API and only becomes reachable once merged into the sync branch), and the Git
-  Data endpoints (`git/commits`, `git/trees`) resolving a parent-repo SHA through the fork;
+  through the Git Data API and only becomes reachable once merged into the sync branch). The Git Data
+  calls that build it were verified above; the merge of it was not;
 - *(step 7)* `GET /repos/{o}/{r}/actions/secrets` returning `updated_at` as assumed (documented, but not
   exercised live), and the Issues permission behaving as described when absent (listing and creating
   issues both refused with 403/404, which the invalid-config report also relies on to stay quiet);

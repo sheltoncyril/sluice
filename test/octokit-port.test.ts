@@ -119,6 +119,18 @@ describe('OctokitPort: compare and merge', () => {
     });
   });
 
+  it('compare passes an owner-qualified head through as `base...owner:sha` (GitHub takes the colon literal or encoded)', async () => {
+    const sha = 'a'.repeat(40);
+    const t = port([
+      [
+        'GET',
+        new RegExp(`compare/main\\.\\.\\.acme(:|%3A)${sha}$`),
+        { status: 200, body: { status: 'ahead', ahead_by: 1, behind_by: 0, html_url: 'u', commits: [] } },
+      ],
+    ]);
+    expect(await t.port.compare(repo, 'main', `acme:${sha}`)).toMatchObject({ status: 'ahead', aheadBy: 1 });
+  });
+
   it('compare turns a 404 into CommitNotReachableError (the "not a fork" signal)', async () => {
     const t = port([['GET', /compare\//, { status: 404, body: { message: 'Not Found' } }]]);
     await expect(t.port.compare(repo, 'main', 'f'.repeat(40))).rejects.toBeInstanceOf(CommitNotReachableError);
