@@ -1,6 +1,8 @@
 import { loadChainConfig } from '../config/load';
 import { applyVariables } from '../secrets/variables';
 import type { VariablesResult } from '../secrets/variables';
+import { reconcileChain } from '../reconcile/reconcile';
+import type { ReconcileResult } from '../reconcile/reconcile';
 import { syncWorkflows } from '../workflows/sync';
 import type { WorkflowsResult } from '../workflows/sync';
 import { formatIssues } from '../config/parse';
@@ -84,5 +86,19 @@ export async function runAdminWorkflows(
   const loaded = await loadChainHandle(deps, input.chain);
   if (!loaded.ok) return loaded;
   const result = await syncWorkflows(deps, loaded.handle, { trigger: 'admin', dryRun: input.dryRun }, logger);
+  return { ok: true, result };
+}
+
+export type AdminReconcileResponse = { ok: true; result: ReconcileResult } | AdminError;
+
+/** Run the full reconcile now. `dry_run` reports drift and changes nothing (no fixes, no PRs, no issue). */
+export async function runAdminReconcile(
+  deps: ChainDeps,
+  input: AdminVariablesInput,
+  logger: Logger,
+): Promise<AdminReconcileResponse> {
+  const loaded = await loadChainHandle(deps, input.chain);
+  if (!loaded.ok) return loaded;
+  const result = await reconcileChain(deps, loaded.handle, { trigger: 'admin', dryRun: input.dryRun }, logger);
   return { ok: true, result };
 }

@@ -5,7 +5,7 @@ import type { Logger } from '../log';
 import { syncChainHop } from './chain';
 import type { ChainDeps } from './chain';
 import { discoverChains } from './discover';
-import type { DiscoveryApi } from './discover';
+import type { DiscoveredChain, DiscoveryApi } from './discover';
 import type { HopResult } from './hop';
 
 export interface PollDeps extends ChainDeps {
@@ -17,6 +17,8 @@ export interface PollOptions {
   /** Ignore poll_interval_minutes (admin "run now"). */
   force?: boolean;
   trigger?: string;
+  /** Chains already discovered this tick (so one scan serves the poll and the reconcile). */
+  chains?: readonly DiscoveredChain[];
 }
 
 /** Cron fires on a coarse schedule; allow a minute and a half of jitter before calling a hop "not due". */
@@ -33,9 +35,9 @@ export async function pollUpstreams(deps: PollDeps, logger: Logger, opts: PollOp
   const results: HopResult[] = [];
   const hop = 'upstream_to_midstream' as const;
 
-  let chains;
+  let chains: readonly DiscoveredChain[];
   try {
-    chains = await discoverChains({
+    chains = opts.chains ?? await discoverChains({
       api: deps.discovery,
       ports: deps.ports,
       store: deps.store,

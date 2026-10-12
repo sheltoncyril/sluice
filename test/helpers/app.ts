@@ -41,6 +41,7 @@ export function makeHarness(overrides: Partial<AppContext> = {}): Harness {
     submitSecret: async () => ({ ok: false, status: 404, error: 'not wired in this test' }),
     runVariables: async () => ({ ok: false, status: 404, error: 'not wired in this test' }),
     runWorkflows: async () => ({ ok: false, status: 404, error: 'not wired in this test' }),
+    runReconcile: async () => ({ ok: false, status: 404, error: 'not wired in this test' }),
     ...overrides,
   };
 

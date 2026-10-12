@@ -58,6 +58,8 @@ export interface PullRequest {
   body: string;
   /** Label names currently on the PR. */
   labels: string[];
+  /** ISO-8601 creation time. */
+  createdAt: string;
   headRef: string;
   /** Head commit when last seen (for a merged PR: the commit that was merged). */
   headSha: string;
@@ -138,6 +140,18 @@ export interface ActionsVariable {
   updatedAt: string;
 }
 
+export interface IssueRef {
+  number: number;
+  htmlUrl: string;
+  body: string;
+}
+
+export interface NewIssue {
+  title: string;
+  body: string;
+  labels: string[];
+}
+
 export type MergeIntoResult =
   | { result: 'merged'; sha: string }
   | { result: 'up_to_date' }
@@ -200,6 +214,11 @@ export interface GitHubPort {
   listActionsVariables(repo: RepoRef): Promise<ActionsVariable[]>;
   createActionsVariable(repo: RepoRef, name: string, value: string): Promise<void>;
   updateActionsVariable(repo: RepoRef, name: string, value: string): Promise<void>;
+
+  /** Issues (the drift report). Requires the app's Issues permission. */
+  findOpenIssueByLabelMarker(repo: RepoRef, label: string, marker: string): Promise<IssueRef | null>;
+  createIssue(repo: RepoRef, issue: NewIssue): Promise<IssueRef>;
+  updateIssue(repo: RepoRef, issueNumber: number, patch: { title?: string; body?: string; state?: 'closed' }): Promise<void>;
 
   addLabels(repo: RepoRef, issueNumber: number, labels: string[]): Promise<void>;
   /** Removes a label from an issue/PR; a label that is not there is not an error. */

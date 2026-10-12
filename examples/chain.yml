@@ -72,3 +72,12 @@ variables: # non-sensitive; applied straight from this file
 secrets: # NAMES ONLY. Values are submitted once via the authenticated endpoint, never stored.
   - name: NPM_TOKEN
     targets: [midstream, downstream]
+    max_age_days: 90 # optional rotation policy: the daily reconcile reports it once it is older
+
+# The scheduled reconcile (all optional; these are the defaults).
+reconcile:
+  enabled: true
+  interval_hours: 24
+  report: issue # one self-updating issue in midstream (needs Issues: write); "none" = run log only
+  issue_label: sluice/drift
+  stale_pr_days: 14 # an open sync PR older than this is reported

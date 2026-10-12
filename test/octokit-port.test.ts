@@ -42,6 +42,7 @@ function port(routes: Array<[string, RegExp, Reply | ((s: Seen) => Reply)]>) {
 }
 
 const pr = (over: Record<string, unknown> = {}) => ({
+  created_at: '2026-01-01T00:00:00Z',
   number: 7,
   state: 'open',
   merged_at: null,
@@ -428,5 +429,52 @@ describe('OctokitPort: workflow commits (content trees, app-signed commits)', ()
     const t = port([['POST', /git\/commits$/, { status: 201, body: { sha: 'c1' } }]]);
     await t.port.createCommit(repo, { message: 'm', treeSha: 'tree1', parents: ['p1'] });
     expect(t.seen[0]!.body).toEqual({ message: 'm', tree: 'tree1', parents: ['p1'] });
+  });
+});
+
+describe('OctokitPort: issues (the drift report) and PR age', () => {
+  it('findOpenIssueByLabelMarker filters by label, skips pull requests, and requires the marker', async () => {
+    const t = port([
+      [
+        'GET',
+        /\/issues$/,
+        {
+          status: 200,
+          body: [
+            { number: 1, html_url: 'https://github.com/me/widget/pull/1', body: 'x <!-- marker --> y', pull_request: { url: 'u' } },
+            { number: 2, html_url: 'https://github.com/me/widget/issues/2', body: 'someone else\'s issue, same label' },
+            { number: 3, html_url: 'https://github.com/me/widget/issues/3', body: 'mine <!-- marker -->' },
+          ],
+        },
+      ],
+    ]);
+    const found = await t.port.findOpenIssueByLabelMarker(repo, 'sluice/drift', '<!-- marker -->');
+    expect(found).toEqual({ number: 3, htmlUrl: 'https://github.com/me/widget/issues/3', body: 'mine <!-- marker -->' });
+    expect(t.seen[0]!.query.get('labels')).toBe('sluice/drift');
+    expect(t.seen[0]!.query.get('state')).toBe('open');
+  });
+
+  it('findOpenIssueByLabelMarker returns null when nothing matches', async () => {
+    const t = port([['GET', /\/issues$/, { status: 200, body: [{ number: 2, html_url: 'u', body: 'no marker' }] }]]);
+    expect(await t.port.findOpenIssueByLabelMarker(repo, 'sluice/drift', '<!-- marker -->')).toBeNull();
+  });
+
+  it('createIssue sends title, body and labels', async () => {
+    const t = port([['POST', /\/issues$/, { status: 201, body: { number: 5, html_url: 'https://github.com/me/widget/issues/5', body: 'b' } }]]);
+    const issue = await t.port.createIssue(repo, { title: 'T', body: 'b', labels: ['sluice/drift'] });
+    expect(issue.number).toBe(5);
+    expect(t.seen[0]!.body).toEqual({ title: 'T', body: 'b', labels: ['sluice/drift'] });
+  });
+
+  it('updateIssue edits the body, and closing says it was completed', async () => {
+    const t = port([['PATCH', /\/issues\/5$/, { status: 200, body: {} }]]);
+    await t.port.updateIssue(repo, 5, { body: 'new' });
+    await t.port.updateIssue(repo, 5, { state: 'closed' });
+    expect(t.seen.map((s) => s.body)).toEqual([{ body: 'new' }, { state: 'closed', state_reason: 'completed' }]);
+  });
+
+  it('pull request views carry their creation time (for the stale-PR check)', async () => {
+    const t = port([['GET', /\/pulls$/, { status: 200, body: [pr({ created_at: '2026-10-01T00:00:00Z' })] }]]);
+    expect((await t.port.findOpenPullRequest(repo, 'chain/sync-upstream', 'main'))?.createdAt).toBe('2026-10-01T00:00:00Z');
   });
 });

@@ -2,6 +2,8 @@ import type { Client } from './client';
 import { CommitNotReachableError, NoCommitsBetweenError, TreeTooLargeError } from './errors';
 import type {
   ActionsPublicKey,
+  IssueRef,
+  NewIssue,
   ActionsSecretInfo,
   ActionsVariable,
   CommitInfo,
@@ -59,6 +61,7 @@ type PullListItem = {
   head: { ref: string; sha: string };
   base: { ref: string };
   html_url: string;
+  created_at: string;
 };
 
 function toPullRequest(p: PullListItem): PullRequest {
@@ -69,6 +72,7 @@ function toPullRequest(p: PullListItem): PullRequest {
     title: p.title,
     body: p.body ?? '',
     labels: (p.labels ?? []).map((l) => l.name),
+    createdAt: p.created_at,
     headRef: p.head.ref,
     headSha: p.head.sha,
     baseRef: p.base.ref,
@@ -450,6 +454,45 @@ export class OctokitPort implements GitHubPort {
       repo: repo.repo,
       name,
       value,
+    });
+  }
+
+  // ---- issues (drift report) ----------------------------------------------------------------
+
+  async findOpenIssueByLabelMarker(repo: RepoRef, label: string, marker: string): Promise<IssueRef | null> {
+    const iterator = this.client.paginate.iterator('GET /repos/{owner}/{repo}/issues', {
+      owner: repo.owner,
+      repo: repo.repo,
+      state: 'open',
+      labels: label,
+      per_page: 30,
+    });
+    for await (const page of iterator) {
+      // The issues endpoint also lists pull requests; skip those.
+      const hit = page.data.find((i) => !i.pull_request && typeof i.body === 'string' && i.body.includes(marker));
+      if (hit) return { number: hit.number, htmlUrl: hit.html_url, body: hit.body ?? '' };
+    }
+    return null;
+  }
+
+  async createIssue(repo: RepoRef, issue: NewIssue): Promise<IssueRef> {
+    const res = await this.client.request('POST /repos/{owner}/{repo}/issues', {
+      owner: repo.owner,
+      repo: repo.repo,
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels,
+    });
+    return { number: res.data.number, htmlUrl: res.data.html_url, body: res.data.body ?? issue.body };
+  }
+
+  async updateIssue(repo: RepoRef, issueNumber: number, patch: { title?: string; body?: string; state?: 'closed' }): Promise<void> {
+    await this.client.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', {
+      owner: repo.owner,
+      repo: repo.repo,
+      issue_number: issueNumber,
+      ...patch,
+      ...(patch.state === 'closed' ? { state_reason: 'completed' as const } : {}),
     });
   }
 

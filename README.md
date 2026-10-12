@@ -20,7 +20,7 @@ tracked branch: it only ever writes to `chain/*` branches and opens PRs from the
 
 ## Status
 
-This repo is being built in reviewable steps.
+All seven planned steps are built. Steps 5–7 await review.
 
 | # | Step | State |
 |---|------|-------|
@@ -30,9 +30,9 @@ This repo is being built in reviewable steps.
 | 4 | Conflict handling (label / comment / assign) and protected paths | ✅ built, merged |
 | 5 | Secret / variable pass-through distribution | ✅ built, **awaiting your review** |
 | 6 | Workflow template PRs | ✅ built, **awaiting your review** |
-| 7 | Drift reconcile | ⏳ not built |
+| 7 | Drift reconcile | ✅ built, **awaiting your review** |
 
-Everything below is accurate for steps 1–6. Sections marked *(planned)* describe design intent only.
+Everything below describes what is built; things I could not verify against live GitHub are listed at the end. Sections marked *(planned)* describe design intent only.
 
 ---
 
@@ -46,7 +46,7 @@ GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App*
 |---|---|
 | Webhook URL | `https://<your-worker>.<your-subdomain>.workers.dev/webhook` (set after the first deploy; use a placeholder until then) |
 | Webhook secret | a random string: `openssl rand -hex 32`. Keep it; it becomes `GITHUB_WEBHOOK_SECRET` |
-| **Repository permissions** | Contents: **Read & write** · Workflows: **Read & write** · Pull requests: **Read & write** · Secrets: **Read & write** · Variables: **Read & write** · Metadata: **Read-only** |
+| **Repository permissions** | Contents: **Read & write** · Workflows: **Read & write** · Pull requests: **Read & write** · Secrets: **Read & write** · Variables: **Read & write** · Metadata: **Read-only** · Issues: **Read & write** *(only for drift reports; see below)* |
 | Subscribe to events | **Push**, **Pull request**. (`installation` and `installation_repositories` are delivered to every GitHub App automatically.) |
 | Where can this app be installed? | **Any account** if midstream and downstream are in different orgs (see note) |
 
@@ -60,6 +60,12 @@ Install the app on the midstream repo and the downstream repo (each org installs
 > be needed for plain sync, because upstream commits can touch `.github/workflows/`; I have not verified
 > whether it applies to creating a ref at an existing commit, so grant it (as the brief specifies) and
 > drop it only after testing. "Secrets" and "Variables" are used by step 5.
+>
+> **Issues permission (one addition to the list in the brief).** The drift report (step 7) is a single
+> self-updating GitHub issue, and creating an issue needs `Issues: Read & write`; Pull requests: write
+> does not cover it. If you would rather not grant it, set `reconcile.report: none` in `chain.yml`: the
+> reconcile still runs and its findings are in the run log and `POST /admin/reconcile`, but no issue is
+> filed. Without the permission and with `report: issue`, sluice says so in the result and keeps going.
 >
 > **Public app, private data:** a GitHub App can be installed on other accounts only if it is
 > public. Midstream and downstream in different orgs therefore forces the app to be public, which
@@ -377,7 +383,57 @@ GitHub attributes it to the app and signs it ("Verified").
 - Needs the app's **Workflows: Read & write** permission. Without it GitHub refuses the write and the
   run log says exactly that.
 
-## 8. Threat model
+## 8. Drift detection
+
+A reconcile re-checks everything sluice is responsible for. It rides the hourly cron tick (no second
+schedule) and runs per chain at most every `reconcile.interval_hours` (default 24); trigger it any time
+with `POST /admin/reconcile {"chain":"my-org/widget","dry_run":true}`, where `dry_run` reports drift and
+changes **nothing** (no fixes, no PRs, no issue).
+
+| What it checks | When it drifts | What sluice does |
+|---|---|---|
+| **Workflow files** vs templates | a managed file differs from its rendered template | opens / refreshes a **PR** (step 6) |
+| **Variables** vs `chain.yml` | a declared variable is missing or has another value | **fixes it directly** |
+| **Secrets** vs `chain.yml` | missing; older than the secret's `max_age_days`; targets written > 15 min apart (a half-finished rotation) | **reports it, never fixes it** |
+| **Hop state** | downstream is behind with no sync PR (a missed webhook) | opens the sync PR (re-runs the hop) |
+|  | a sync PR is conflicted, errored, or open longer than `stale_pr_days` (14) | reports it |
+
+Only things **a person must look at** are findings; what sluice fixed, or opened a PR for, is not.
+
+**Secrets can only be compared by name and timestamp.** GitHub never reveals a secret, so sluice cannot
+tell whether a value is *right*, only that a name exists and when it was last written. It also cannot
+fix one: it does not have the value (by design, it never stores one). The fix is always you submitting
+it again. Add a rotation policy per secret if you want staleness reported:
+
+```yaml
+secrets:
+  - name: NPM_TOKEN
+    max_age_days: 90
+
+reconcile:            # all optional; these are the defaults
+  enabled: true
+  interval_hours: 24
+  report: issue       # or "none": run log only, no issue
+  issue_label: sluice/drift
+  stale_pr_days: 14
+```
+
+### The report
+
+With `report: issue`, findings are kept in **one issue** in the midstream repo, found by the
+`sluice/drift` label plus a hidden marker (so an unrelated issue carrying the label is never touched):
+
+- it is **created** when something needs attention, **edited in place** when the findings change, and
+  **closed with a comment** when everything is in order; a later problem opens a new one;
+- an unchanged report costs zero writes, and the body is deterministic (no timestamps), so it never
+  churns;
+- if a rate limit cuts the reconcile short, the report is left alone rather than rewritten from half the
+  evidence.
+
+Needs the Issues permission (see registration). Each reconcile is also recorded in the run log
+(`outcome`: `reconcile_clean`, `reconcile_findings` or `reconcile_partial`, with counts per kind).
+
+## 9. Threat model
 
 | Threat | Mitigation |
 |---|---|
@@ -412,10 +468,10 @@ Credentials the Worker itself must hold (unavoidable): `GITHUB_APP_PRIVATE_KEY`,
 `GITHUB_WEBHOOK_SECRET`, `ADMIN_TOKEN`, as Worker secrets. Installation tokens are minted per use,
 cached in isolate memory only, and live ~1 hour.
 
-## 9. Development
+## 10. Development
 
 ```bash
-npm test               # vitest: ~380 tests, no network, no Cloudflare account
+npm test               # vitest: ~410 tests, no network, no Cloudflare account
 npm run typecheck
 npx wrangler dev       # local workerd; put dev secrets in .dev.vars (git-ignored)
 ```
@@ -437,6 +493,8 @@ and one real sync on a throwaway chain before relying on them:
 - *(step 4)* the Merges API accepting the **unreferenced restore commit** as `head` (it is created
   through the Git Data API and only becomes reachable once merged into the sync branch), and the Git
   Data endpoints (`git/commits`, `git/trees`) resolving a parent-repo SHA through the fork;
+- *(step 7)* `GET /repos/{o}/{r}/actions/secrets` returning `updated_at` as assumed (documented, but not
+  exercised live), and the Issues permission behaving as described when absent;
 - *(step 6)* GitHub accepting a Git Data API commit that adds or changes `.github/workflows/*.yml` (and
   what it says without the Workflows permission), and signing a commit that sets no author;
 - *(step 5)* GitHub accepting the sealed-box ciphertext for `PUT .../actions/secrets/{name}`. It is

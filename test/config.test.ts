@@ -202,6 +202,25 @@ variables: [{ name: lower, value: x }]
     expect(has(e, 'secrets[0].targets[0]', /upstream is third-party/)).toBe(true);
   });
 
+  it('validates reconcile settings and secret max_age_days', () => {
+    const ok = parseChainConfig(`${MIN}\nreconcile:\n  interval_hours: 6\n  report: none\n  stale_pr_days: 3\nsecrets:\n  - { name: A, max_age_days: 90 }\n`);
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.config.reconcile).toMatchObject({ enabled: true, interval_hours: 6, report: 'none', stale_pr_days: 3, issue_label: 'sluice/drift' });
+      expect(ok.config.secrets[0]!.max_age_days).toBe(90);
+    }
+    const bad = errors(`${MIN}\nreconcile: { interval_hours: 0, report: slack, stale_pr_days: 0 }\nsecrets: [{ name: A, max_age_days: 0 }]\n`);
+    expect(has(bad, 'reconcile.interval_hours', /at least 1/)).toBe(true);
+    expect(has(bad, 'reconcile.report', /"issue" or "none"/)).toBe(true);
+    expect(has(bad, 'reconcile.stale_pr_days')).toBe(true);
+    expect(has(bad, 'secrets[0].max_age_days', /at least 1/)).toBe(true);
+  });
+
+  it('defaults reconcile to daily, with an issue report', () => {
+    const r = parseChainConfig(MIN);
+    expect(r.ok && r.config.reconcile).toMatchObject({ enabled: true, interval_hours: 24, report: 'issue', stale_pr_days: 14 });
+  });
+
   it('rejects duplicate declarations and empty/duplicate targets', () => {
     const dup = errors(`${MIN}
 secrets: [{ name: A, targets: [midstream] }, { name: A, targets: [midstream, downstream] }]

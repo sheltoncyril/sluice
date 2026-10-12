@@ -7,6 +7,7 @@ import type {
   AdminSyncResponse,
   AdminVariablesInput,
   AdminVariablesResponse,
+  AdminReconcileResponse,
   AdminWorkflowsResponse,
 } from './sync/admin';
 
@@ -41,4 +42,6 @@ export interface AppContext {
   runVariables(input: AdminVariablesInput): Promise<AdminVariablesResponse>;
   /** Render the workflow templates and open/refresh the workflow PRs (or preview with dryRun). */
   runWorkflows(input: AdminVariablesInput): Promise<AdminWorkflowsResponse>;
+  /** Run the drift reconcile now (or preview it with dryRun). */
+  runReconcile(input: AdminVariablesInput): Promise<AdminReconcileResponse>;
 }
