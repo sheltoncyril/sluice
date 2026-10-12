@@ -367,14 +367,14 @@ describe('OctokitPort: mergeability and labels', () => {
 
 describe('OctokitPort: Actions secrets and variables', () => {
   it('getActionsPublicKey maps key_id and key', async () => {
-    const t = port([['GET', /actions\/secrets\/public-key$/, { status: 200, body: { key_id: '012345', key: 'base64key==' } }]]);
-    expect(await t.port.getActionsPublicKey(repo)).toEqual({ keyId: '012345', key: 'base64key==' });
+    const t = port([['GET', /actions\/secrets\/public-key$/, { status: 200, body: { key_id: '012345', key: 'FAKE-PUBLIC-KEY' } }]]);
+    expect(await t.port.getActionsPublicKey(repo)).toEqual({ keyId: '012345', key: 'FAKE-PUBLIC-KEY' });
   });
 
   it('putActionsSecret sends ONLY ciphertext and key_id, and maps 201 / 204', async () => {
     const created = port([['PUT', /actions\/secrets\/NPM_TOKEN$/, { status: 201, body: {} }]]);
-    expect(await created.port.putActionsSecret(repo, 'NPM_TOKEN', 'Y2lwaGVydGV4dA==', 'k1')).toBe('created');
-    expect(created.seen[0]!.body).toEqual({ encrypted_value: 'Y2lwaGVydGV4dA==', key_id: 'k1' });
+    expect(await created.port.putActionsSecret(repo, 'NPM_TOKEN', 'FAKE-CIPHERTEXT', 'k1')).toBe('created');
+    expect(created.seen[0]!.body).toEqual({ encrypted_value: 'FAKE-CIPHERTEXT', key_id: 'k1' });
 
     const updated = port([['PUT', /actions\/secrets\/NPM_TOKEN$/, { status: 204 }]]);
     expect(await updated.port.putActionsSecret(repo, 'NPM_TOKEN', 'x', 'k1')).toBe('updated');
