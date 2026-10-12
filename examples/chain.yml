@@ -78,6 +78,7 @@ secrets: # NAMES ONLY. Values are submitted once via the authenticated endpoint,
 reconcile:
   enabled: true
   interval_hours: 24
-  report: issue # one self-updating issue in midstream (needs Issues: write); "none" = run log only
+  report: issue # one self-updating issue in midstream (needs Issues: write); "none" = run log only.
+                # The same issue reports this file if it ever stops validating; "none" opts out of that too.
   issue_label: sluice/drift
   stale_pr_days: 14 # an open sync PR older than this is reported

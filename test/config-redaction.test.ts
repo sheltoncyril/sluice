@@ -191,6 +191,15 @@ describe('what is still said, so the errors stay useful', () => {
     expect(e.message).toMatch(/built-in/);
   });
 
+  it('names every built-in a template value would shadow, including those that are not schema keys', () => {
+    const e = issuesOf(`${MIN}workflows:\n  values: { role: x, upstream_repo: y, downstream_repo: z }\n`);
+    expect(e.map((i) => i.path).sort()).toEqual([
+      'workflows.values.downstream_repo',
+      'workflows.values.role',
+      'workflows.values.upstream_repo',
+    ]);
+  });
+
   it('does not repeat the configured repo name when chain.yml names another repository', async () => {
     const { checkConfigText } = await import('../src/config/load');
     const text = MIN.replace('midstream: { repo: me/widget }', 'midstream: { repo: someone/else }');

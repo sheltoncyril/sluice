@@ -165,6 +165,14 @@ describe('an invalid chain.yml found by the scheduled scan', () => {
     expect(open(s)).toHaveLength(1);
   });
 
+  it('does not even look for a stale report on a chain that opted out of issues', async () => {
+    const s = chainScene({ configYaml: chainYml({ extra: 'reconcile:\n  report: none\n' }) });
+    const chains = await scan(s);
+    expect(chains).toHaveLength(1);
+    await push(s);
+    expect(issueCalls(s)).toEqual([]); // the owner chose not to grant Issues; do not probe for it every hour
+  });
+
   it('files it under the label the broken file asked for', async () => {
     const s = chainScene({ configYaml: chainYml({ extra: 'reconcile:\n  issue_label: ops/drift\nvariabless: []\n' }) });
     await scan(s);
