@@ -13,7 +13,7 @@ import { reconcileAll } from './reconcile/schedule';
 import { runAdminReconcile, runAdminSync, runAdminVariables, runAdminWorkflows } from './sync/admin';
 import { discoverChains } from './sync/discover';
 import type { PollDeps } from './sync/poll';
-import { pollUpstreams } from './sync/poll';
+import { healFailedDownstream, pollUpstreams } from './sync/poll';
 
 interface Runtime {
   ctx: AppContext;
@@ -95,6 +95,7 @@ export default {
           return [];
         });
         await pollUpstreams(poll, logger, { chains }).catch((e) => logger.error('scheduled poll failed', message(e)));
+        await healFailedDownstream(poll, chains, logger).catch((e) => logger.error('downstream retry failed', message(e)));
         await reconcileAll(poll, chains, logger).catch((e) => logger.error('scheduled reconcile failed', message(e)));
         await store
           .prune(cutoff)

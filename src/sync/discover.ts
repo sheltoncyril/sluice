@@ -88,33 +88,45 @@ export async function discoverChains(deps: DiscoveryDeps): Promise<DiscoveredCha
     }
   };
 
-  if (deps.onlyRepos && deps.onlyRepos.size > 0) {
-    for (const name of deps.onlyRepos) {
-      const holder = parseRepo(name);
-      if (!isOwnerAllowed(deps.allowedOwners, holder.owner)) {
-        logger.warn('CHAIN_REPOS entry outside ALLOWED_OWNERS ignored', { repo: name });
+  // A rate limit part-way through must not throw away the chains already found: each chain is independent,
+  // and the ones not reached are picked up on a later tick.
+  const scan = async (): Promise<DiscoveredChain[]> => {
+    if (deps.onlyRepos && deps.onlyRepos.size > 0) {
+      for (const name of deps.onlyRepos) {
+        const holder = parseRepo(name);
+        if (!isOwnerAllowed(deps.allowedOwners, holder.owner)) {
+          logger.warn('CHAIN_REPOS entry outside ALLOWED_OWNERS ignored', { repo: name });
+          continue;
+        }
+        const port = await deps.ports.forRepo(holder);
+        if (!port) {
+          logger.warn('app not installed on configured midstream', { repo: name });
+          continue;
+        }
+        await consider(holder, null, port);
+      }
+      return found;
+    }
+
+    for (const inst of await deps.api.listInstallations()) {
+      if (inst.suspended) continue;
+      if (!isOwnerAllowed(deps.allowedOwners, inst.login)) {
+        logger.debug('installation skipped: not in ALLOWED_OWNERS', { account: inst.login });
         continue;
       }
-      const port = await deps.ports.forRepo(holder);
-      if (!port) {
-        logger.warn('app not installed on configured midstream', { repo: name });
-        continue;
+      const port = await deps.ports.forInstallation(inst.id);
+      for (const holder of await deps.api.listRepositories(inst.id)) {
+        await consider(holder, inst.id, port);
       }
-      await consider(holder, null, port);
     }
     return found;
-  }
+  };
 
-  for (const inst of await deps.api.listInstallations()) {
-    if (inst.suspended) continue;
-    if (!isOwnerAllowed(deps.allowedOwners, inst.login)) {
-      logger.debug('installation skipped: not in ALLOWED_OWNERS', { account: inst.login });
-      continue;
-    }
-    const port = await deps.ports.forInstallation(inst.id);
-    for (const holder of await deps.api.listRepositories(inst.id)) {
-      await consider(holder, inst.id, port);
-    }
+  try {
+    return await scan();
+  } catch (e) {
+    if ((e as Error)?.name !== 'RateLimitExceededError') throw e;
+    logger.warn('discovery stopped early: rate limited; continuing with the chains found so far', { found: found.length });
+    return found;
   }
-  return found;
 }

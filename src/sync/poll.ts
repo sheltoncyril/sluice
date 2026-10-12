@@ -100,3 +100,41 @@ export async function pollUpstreams(deps: PollDeps, logger: Logger, opts: PollOp
   logger.info('poll finished', { results: results.map((r) => `${r.chain}:${r.outcome}`) });
   return results;
 }
+
+/**
+ * midstream -> downstream is push-driven, so a run that failed (a webhook that raced GitHub's replication
+ * through a fork, a rate limit, an outage) would otherwise wait for the daily reconcile or the next push.
+ * If the latest recorded result of a chain's downstream hop is an error, retry it on the hourly tick.
+ * A healthy chain costs one read of the run log and no GitHub calls.
+ */
+export async function healFailedDownstream(deps: ChainDeps, chains: readonly DiscoveredChain[], logger: Logger): Promise<HopResult[]> {
+  const results: HopResult[] = [];
+  for (const chain of chains) {
+    const key = fullName(chain.holder);
+    const log = logger.child({ chain: key });
+    try {
+      const last = (await deps.store.recentRuns(key, 25)).find((r) => r.hop === 'midstream_to_downstream');
+      if (!last || (last.outcome !== 'error' && last.outcome !== 'rate_limited')) continue;
+
+      const midstreamPort = await deps.ports.forRepo(chain.holder);
+      if (!midstreamPort) continue;
+      log.info('retrying a failed downstream sync', { previous: last.outcome });
+      results.push(
+        await syncChainHop(
+          deps,
+          { holder: chain.holder, config: chain.config, midstreamPort },
+          'midstream_to_downstream',
+          { trigger: 'cron' },
+          log,
+        ),
+      );
+    } catch (e) {
+      if (e instanceof RateLimitExceededError) {
+        log.warn('downstream retry stopped: rate limited', { retryAfterMs: e.retryAfterMs });
+        break;
+      }
+      log.error('downstream retry failed', errorFields(e));
+    }
+  }
+  return results;
+}

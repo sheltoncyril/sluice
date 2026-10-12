@@ -139,19 +139,29 @@ export function describeError(e: unknown): string {
 
 /**
  * A push webhook reaches us faster than GitHub makes the new objects readable through a fork: measured on
- * a live chain, the commit in under a second but its tree only after ~3 s (422 until then). Retry the
- * read a few times with doubling waits (1+2+4+8 s at most) before believing "not reachable".
+ * a live chain, the commit in under a second but its tree after anywhere from ~3 s to over 15 s (422 until
+ * then). Retry the read with growing waits before believing "not reachable".
+ *
+ * The budget is 20 s because a webhook is processed inside waitUntil, which the runtime bounds (about 30 s
+ * after the response). A run that still fails is recorded as an error, and the hourly tick retries it
+ * (healFailedDownstream), so the tail of the distribution costs minutes, not a day.
  *
  * Only for reads of objects we know the source has. A genuinely unrelated repo is rejected earlier, by
  * the ancestry check, and never waits.
  */
-export async function whenVisible<T>(read: () => Promise<T>, sleep: (ms: number) => Promise<void>, attempts = 5): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
+export const VISIBILITY_WAITS_MS = [1000, 2000, 4000, 6000, 7000] as const;
+
+export async function whenVisible<T>(
+  read: () => Promise<T>,
+  sleep: (ms: number) => Promise<void>,
+  waits: readonly number[] = VISIBILITY_WAITS_MS,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
     try {
       return await read();
     } catch (e) {
-      if (!(e instanceof CommitNotReachableError) || attempt >= attempts) throw e;
-      await sleep(1000 * 2 ** (attempt - 1));
+      if (!(e instanceof CommitNotReachableError) || attempt >= waits.length) throw e;
+      await sleep(waits[attempt]!);
     }
   }
 }
