@@ -28,6 +28,21 @@ export interface InstallationSummary {
 
 const INSTALLATION_CACHE_MS = 10 * 60 * 1000;
 
+export interface CommitIdentity {
+  name: string;
+  email: string;
+}
+
+/**
+ * GitHub's own noreply address for a bot account: `<user id>+<slug>[bot]@users.noreply.github.com`.
+ * Authored this way a commit links to the app's bot user. The numeric id is the BOT USER's id, which is
+ * not the app's id.
+ */
+export function botCommitIdentity(slug: string, botUserId: number): CommitIdentity {
+  const login = `${slug}[bot]`;
+  return { name: login, email: `${botUserId}+${login}@users.noreply.github.com` };
+}
+
 /**
  * Thin wrapper over @octokit/app: App JWT (RS256 via WebCrypto, PKCS#8 key) and per-installation
  * tokens. Tokens are minted and cached in-memory by @octokit/auth-app (they live ~1h and are never
@@ -127,6 +142,34 @@ export class GitHubApp {
     const client = await this.forInstallation(installationId);
     const repos = await client.paginate('GET /installation/repositories', { per_page: 100 });
     return repos.filter((r) => !r.archived && !r.disabled).map((r) => ({ owner: r.owner.login, repo: r.name }));
+  }
+
+  private bot: Promise<CommitIdentity | null> | undefined;
+
+  /**
+   * The identity commits made by this app should carry: its own bot account (`<slug>[bot]`). GitHub then
+   * shows the app's name and logo on them. Looked up once per isolate (two public reads) and cached; a
+   * failed lookup is not cached, and the caller falls back to an address that links to nobody.
+   */
+  botIdentity(): Promise<CommitIdentity | null> {
+    this.bot ??= (async () => {
+      await this.ensureKeyUsable();
+      const { data } = await this.asApp.request('GET /app');
+      const slug = data?.slug;
+      if (!slug) return null;
+      // /users/{login} is not an app endpoint, so ask with an installation token (as every other public
+      // read here does), not with the app's JWT.
+      const installation = (await this.listInstallations()).find((i) => !i.suspended);
+      if (!installation) return null;
+      const client = await this.forInstallation(installation.id);
+      const user = await client.request('GET /users/{username}', { username: `${slug}[bot]` });
+      return botCommitIdentity(slug, Number(user.data.id));
+    })().catch((e) => {
+      this.bot = undefined;
+      this.opts.logger.warn('could not look up the app bot identity; commits will use the fallback', errorFields(e));
+      return null;
+    });
+    return this.bot;
   }
 
   /** Who am I? Used by /admin/whoami to prove the JWT + key conversion work in the deployed Worker. */

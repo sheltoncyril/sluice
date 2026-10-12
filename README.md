@@ -255,8 +255,15 @@ file), parented on the source tip. That commit is what gets merged, so:
 - everything else in the PR is the normal sync;
 - the source tip is still an ancestor, so "up to date" detection converges once the PR lands.
 
-The commit is deterministic (fixed identity `sluice <sluice@users.noreply.github.com>` and the
-source commit's date), so re-runs and overlapping runs produce the same object. A run that changes
+The commit is deterministic (a fixed identity and the source commit's date), so re-runs and
+overlapping runs produce the same object. The identity is the **app's own bot account**
+(`<slug>[bot]`, with GitHub's noreply address `<bot user id>+<slug>[bot]@users.noreply.github.com`),
+looked up once per isolate from `GET /app` and `GET /users/<slug>[bot]` (the latter with an installation
+token: the same lookup made with the app's JWT did not yield an identity in production, and the
+fallback below was used instead), so GitHub shows the app's name and logo on it. If that lookup fails it falls back to `sluice <sluice@sluice.invalid>`: an address no
+GitHub account can own. That matters because GitHub links a commit to whichever account owns its email;
+an earlier fixed choice, `sluice@users.noreply.github.com`, belongs to a real unrelated user, whose name
+and avatar then appeared on the PR. A run that changes
 nothing creates **no** objects. The PR body lists the protected paths that were kept. `dry_run`
 reports them as `plan.protectedPaths`.
 
@@ -518,18 +525,52 @@ server-side three-way merges with conflicts, PRs landing by merge/squash/rebase)
 against it; `test/octokit-port.test.ts` pins the real adapter's request shapes and GitHub's
 error responses with a mocked HTTP layer.
 
+### Verified against live GitHub
+
+Checked by hand on one chain on 2026-10-12: a public repo → a user-owned fork → an org-owned fork of
+that fork (so a cross-owner network). Public repos, one chain, one day: treat it as evidence, not proof.
+
+- **Objects are shared across the network, across owners.** A commit that exists only in the parent
+  can be used from the fork by: `POST git/refs` (create a ref at it), the Merges API as `head` (bare
+  SHA), `GET git/commits/{sha}`, `GET git/trees/{sha}?recursive=1`, `POST git/trees` with it as
+  `base_tree`, and `POST git/commits` with it as a `parent`.
+- **The Compare API does not, when the SHA is bare.** `compare/{branch}...{sha}` is a **404** for a
+  commit that is on no branch of that repo, even though every call above accepts it. It resolves the
+  same commit as `{owner}:{sha}`, which is the form the API documents for comparing across a network.
+  sluice qualifies every source-side SHA it compares with the source repo's owner. The first live
+  sync of the chain above failed on exactly this, and the in-memory test double had been more lenient
+  than GitHub; it now models the 404 (`test/foreign-commit.test.ts`).
+- The Merges API does **not** accept the qualified form (`head=owner:sha` is a 404 "Head does not
+  exist"), so only Compare gets the qualifier.
+- **A push is visible through the fork before its tree is.** Measured: the new commit is readable in
+  under a second, but `git/trees/{tree}?recursive=1` answers **422** "Invalid object requested" for
+  about 3 s. A push webhook is faster than that, and the first fixed sync failed on it. The engine now
+  retries that read with 1, 2, 4, 8 s waits before reporting the commit as not reachable (only when
+  protected paths make it read trees; a source outside the network still fails immediately).
+- Plain `GET git/trees/{tree}` (no `recursive`) through a fork 404s for a parent-only tree **even
+  after five minutes**, while the recursive form works. sluice only uses the recursive listing.
+- **One sync, end to end** (midstream → downstream, the fast-forward case, one protected path): the
+  PR opened, was labelled and assigned, GitHub reported it mergeable, and it carried exactly the
+  expected file, with the protected `.github/chain.yml` left out. This includes creating the restore
+  commit (tree deletion over a parent-only tree, a commit with a fixed identity and a parent-only
+  parent) and creating a branch at it.
+
+- **The merge path, and a second cycle.** After PR #1 was merged (so the target had commits of its
+  own), the next push made the engine create a restore commit and have the **Merges API merge it into
+  the sync branch** (a `<slug>[bot]` merge commit with two parents), open a second PR, and that PR
+  merged cleanly. So the Merges API does accept the unreferenced restore commit as `head`. After both
+  merges the downstream's files equalled the midstream's, minus the protected `.github/chain.yml`.
+- **Commit attribution.** A commit's author is linked to whichever GitHub account owns its email.
+  `<name>@users.noreply.github.com` is that account's own address; an address on the `.invalid` TLD
+  links to nobody; `<id>+<slug>[bot]@users.noreply.github.com` links to the app's bot (shown with
+  type `Bot`).
+
 ### Not verified against live GitHub
 
 These behaviours are asserted from GitHub's documentation and experience but have **not** been
 exercised against the real API from this repo; confirm them with `POST /admin/sync` + `dry_run`
 and one real sync on a throwaway chain before relying on them:
 
-- creating a ref in a fork that points at a commit that only exists in the parent repo;
-- `compare` and the Merges API accepting such a SHA;
-- cross-org forks sharing objects as assumed;
-- *(step 4)* the Merges API accepting the **unreferenced restore commit** as `head` (it is created
-  through the Git Data API and only becomes reachable once merged into the sync branch), and the Git
-  Data endpoints (`git/commits`, `git/trees`) resolving a parent-repo SHA through the fork;
 - *(step 7)* `GET /repos/{o}/{r}/actions/secrets` returning `updated_at` as assumed (documented, but not
   exercised live), and the Issues permission behaving as described when absent (listing and creating
   issues both refused with 403/404, which the invalid-config report also relies on to stay quiet);

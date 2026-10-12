@@ -31,7 +31,14 @@ function getRuntime(env: Env): Runtime {
   const store = new D1Store(env.DB);
   const now = () => new Date();
   const ports = octokitPortFactory(github);
-  const chainDeps = { ports, store, now, allowedOwners: config.allowedOwners };
+  const chainDeps = {
+    ports,
+    store,
+    now,
+    allowedOwners: config.allowedOwners,
+    // Restore commits are attributed to this app's own bot account.
+    commitIdentity: () => github.botIdentity(),
+  };
   const sealer = new NaclSealer();
 
   cached = {

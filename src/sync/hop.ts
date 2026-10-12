@@ -1,5 +1,5 @@
 import type { HopId, MergeMethod } from '../config/schema';
-import { NoCommitsBetweenError } from '../github/errors';
+import { CommitNotReachableError, NoCommitsBetweenError } from '../github/errors';
 import { guardBotBranches, isBotBranch } from '../github/guard';
 import type { CompareResult, GitHubPort, PullRequest, RepoRef } from '../github/port';
 import { fullName } from '../github/port';
@@ -61,6 +61,11 @@ export interface HopDeps {
   sleep?: (ms: number) => Promise<void>;
   /** How hard to poll GitHub's lazily computed `mergeable`. */
   polling?: MergeabilityPolling;
+  /**
+   * Who restore commits are attributed to, looked up only when one is actually created. Null or absent
+   * means the fixed fallback identity, which links to no GitHub account.
+   */
+  commitIdentity?: () => Promise<{ name: string; email: string } | null>;
 }
 
 export interface HopOptions {
@@ -118,6 +123,39 @@ export interface HopResult {
 const short = (sha: string) => sha.slice(0, 7);
 const normalise = (s: string) => s.replace(/\r\n/g, '\n').trim();
 
+const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * The message recorded for a failed run. A transport error can carry no message at all (seen live: a run
+ * logged as `error` with nothing else), which leaves nothing to act on, so fall back to what is known.
+ */
+export function describeError(e: unknown): string {
+  const text = e instanceof Error ? e.message : String(e);
+  if (text.trim() !== '') return scrubString(text);
+  const name = e instanceof Error ? e.name : typeof e;
+  const status = (e as { status?: unknown } | null)?.status;
+  return `${name}${typeof status === 'number' ? ` (HTTP ${status})` : ''} with no message`;
+}
+
+/**
+ * A push webhook reaches us faster than GitHub makes the new objects readable through a fork: measured on
+ * a live chain, the commit in under a second but its tree only after ~3 s (422 until then). Retry the
+ * read a few times with doubling waits (1+2+4+8 s at most) before believing "not reachable".
+ *
+ * Only for reads of objects we know the source has. A genuinely unrelated repo is rejected earlier, by
+ * the ancestry check, and never waits.
+ */
+export async function whenVisible<T>(read: () => Promise<T>, sleep: (ms: number) => Promise<void>, attempts = 5): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await read();
+    } catch (e) {
+      if (!(e instanceof CommitNotReachableError) || attempt >= attempts) throw e;
+      await sleep(1000 * 2 ** (attempt - 1));
+    }
+  }
+}
+
 export async function syncHop(spec: HopSpec, deps: HopDeps, opts: HopOptions): Promise<HopResult> {
   const startedAt = deps.now().toISOString();
   const logger = deps.logger.child({ chain: spec.chain, hop: spec.id });
@@ -133,7 +171,7 @@ export async function syncHop(spec: HopSpec, deps: HopDeps, opts: HopOptions): P
       rethrow = e;
     } else {
       logger.error('hop failed', errorFields(e));
-      result = { hop: spec.id, chain: spec.chain, outcome: 'error', message: scrubString(e instanceof Error ? e.message : String(e)) };
+      result = { hop: spec.id, chain: spec.chain, outcome: 'error', message: describeError(e) };
     }
   }
 
@@ -181,11 +219,17 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   let closedCache: PullRequest[] | undefined;
   const closed = async () => (closedCache ??= await out.listClosedPullRequests(target.repo, spec.syncBranch, target.branch, 10));
 
+  // A source commit lives in another repo of the fork network. GitHub's Compare API 404s on such a SHA
+  // given bare (verified on a live user -> org fork chain; createBranch, the Merges API and the Git Data
+  // endpoints all accept it bare), but resolves it when qualified with the owner, which is the form the
+  // API documents for comparing across a network. Only compare calls need this.
+  const fromSource = (sha: string) => `${source.repo.owner}:${sha}`;
+
   // ---- Is the target behind the source? ----------------------------------------------------
   const ancestry: CompareResult =
     sourceSha === targetSha
       ? { status: 'identical', aheadBy: 0, behindBy: 0, commits: [], htmlUrl: '' }
-      : await out.compare(target.repo, target.branch, sourceSha);
+      : await out.compare(target.repo, target.branch, fromSource(sourceSha));
 
   let pending = ancestry.aheadBy > 0;
   let described = ancestry; // what the PR body lists as "commits"
@@ -196,7 +240,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
     if (baseline === sourceSha) {
       pending = false;
     } else if (baseline) {
-      described = await out.compare(target.repo, baseline, sourceSha);
+      described = await out.compare(target.repo, fromSource(baseline), fromSource(sourceSha));
       pending = described.aheadBy > 0;
     }
   }
@@ -208,7 +252,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   // Protected paths the source would overwrite (read-only; objects are only created if we really sync).
   const protection =
     pending && !wasRejected && spec.protectedPaths.length > 0
-      ? await planProtection(out, target.repo, sourceSha, targetSha, spec.protectedPaths)
+      ? await whenVisible(() => planProtection(out, target.repo, sourceSha, targetSha, spec.protectedPaths), deps.sleep ?? realSleep)
       : null;
 
   const plan: HopPlan = {
@@ -258,7 +302,17 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   // (created lazily, so a run that changes nothing creates no objects).
   let restored: string | undefined;
   const effective = async (): Promise<string> =>
-    protection ? (restored ??= await createRestoreCommit(out, target.repo, protection, sourceSha, target.branch)) : sourceSha;
+    protection
+      ? (restored ??= await createRestoreCommit(
+          out,
+          target.repo,
+          protection,
+          sourceSha,
+          target.branch,
+          // An identity that cannot be looked up is "unknown", never a reason to fail the sync.
+          (await deps.commitIdentity?.().catch(() => null)) ?? undefined,
+        ))
+      : sourceSha;
 
   // Target has no commits of its own -> the branch can simply BE that commit (fast-forward).
   // Otherwise start from the target tip and let GitHub merge it in.
@@ -301,7 +355,7 @@ async function runHop(spec: HopSpec, deps: HopDeps, opts: HopOptions, logger: Lo
   // already contains the source (then re-running is a no-op).
   const needsMerge = freshBranch
     ? !fastForward
-    : branchSha !== sourceSha && (await out.compare(target.repo, spec.syncBranch, sourceSha)).aheadBy > 0;
+    : branchSha !== sourceSha && (await out.compare(target.repo, spec.syncBranch, fromSource(sourceSha))).aheadBy > 0;
 
   let structuralConflict = false; // GitHub refused the merge just now (evidence, before it has polled)
   if (needsMerge) {

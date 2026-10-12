@@ -223,7 +223,8 @@ export class OctokitPort implements GitHubPort {
     } catch (e) {
       // 404 "No common ancestor" / "Not Found": a SHA this repo cannot see.
       if (isStatus(e, 404) || (isStatus(e, 422) && mentions(e, /no commit found|not a valid/i))) {
-        throw new CommitNotReachableError(fullName(repo), head);
+        // Report the commit, not the `owner:` qualifier the engine put in front of it.
+        throw new CommitNotReachableError(fullName(repo), head.replace(/^[^:/]+:/, ''));
       }
       throw e;
     }
@@ -334,12 +335,21 @@ export class OctokitPort implements GitHubPort {
   }
 
   async getTreeEntries(repo: RepoRef, treeSha: string): Promise<TreeEntry[]> {
-    const res = await this.client.request('GET /repos/{owner}/{repo}/git/trees/{tree_sha}', {
-      owner: repo.owner,
-      repo: repo.repo,
-      tree_sha: treeSha,
-      recursive: '1',
-    });
+    let res;
+    try {
+      res = await this.client.request('GET /repos/{owner}/{repo}/git/trees/{tree_sha}', {
+        owner: repo.owner,
+        repo: repo.repo,
+        tree_sha: treeSha,
+        recursive: '1',
+      });
+    } catch (e) {
+      // Through a fork, the tree of a commit pushed to the PARENT a moment ago answers 422 "Invalid object
+      // requested" for a few seconds (observed live: ~3 s; the commit itself is readable in under one).
+      // Not a failure of the repo, so say "not reachable (yet)" and let the engine retry.
+      if (isStatus(e, 404) || isStatus(e, 422)) throw new CommitNotReachableError(fullName(repo), treeSha);
+      throw e;
+    }
     if (res.data.truncated) throw new TreeTooLargeError(fullName(repo));
     const entries: TreeEntry[] = [];
     for (const e of res.data.tree) {
